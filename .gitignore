@@ -1,2 +1,7 @@
 /.venv
 /instance
+*.log
+*_backup_*.py
+__pycache__/
+*.pyc
+.DS_Store

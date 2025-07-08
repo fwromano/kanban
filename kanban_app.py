@@ -39,7 +39,20 @@ def ensure_columns() -> None:
         return
     
     app.logger.info(f"Auto-migration: Checking schema for existing SQLite database: {path}")
-    needed = {"card": {"start_date": "DATE", "due_date": "DATE", "priority": "INTEGER DEFAULT 2"}}
+    needed = {
+        "card": {
+            "start_date": "DATE", 
+            "due_date": "DATE", 
+            "priority": "INTEGER DEFAULT 2",
+            "is_archived": "BOOLEAN DEFAULT 0"
+        },
+        "board": {
+            "description": "TEXT DEFAULT ''",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+            "is_active": "BOOLEAN DEFAULT 1"
+        }
+    }
     conn = None
     try:
         conn = sqlite3.connect(path)
@@ -68,7 +81,12 @@ def ensure_columns() -> None:
 class Board(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(64), default="My Board", nullable=False)
-    columns = db.relationship("Column", backref="board", cascade="all, delete", order_by="Column.position") # Added order_by
+    description = db.Column(db.Text, default="")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = db.Column(db.Boolean, default=True)
+    columns = db.relationship("Column", backref="board", cascade="all, delete", order_by="Column.position")
+    labels = db.relationship("Label", backref="board", cascade="all, delete")
 
 class Column(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -85,9 +103,22 @@ class Card(db.Model):
     start_date = db.Column(db.Date)
     due_date = db.Column(db.Date)
     priority = db.Column(db.Integer, default=2) # 1:High, 2:Medium, 3:Low
+    is_archived = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     column_id = db.Column(db.Integer, db.ForeignKey("column.id"))
+    labels = db.relationship("Label", secondary="card_labels", backref="cards")
+
+class Label(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(32), nullable=False)
+    color = db.Column(db.String(7), nullable=False) # Hex color
+    board_id = db.Column(db.Integer, db.ForeignKey("board.id"))
+
+card_labels = db.Table('card_labels',
+    db.Column('card_id', db.Integer, db.ForeignKey('card.id'), primary_key=True),
+    db.Column('label_id', db.Integer, db.ForeignKey('label.id'), primary_key=True)
+)
 
 # DB init / seed
 # ────────────────────────────────────────────────────────────────────────────────
@@ -137,21 +168,113 @@ def card_to_dict(card: Card) -> Dict:
         "position": card.position, "column_id": card.column_id,
         "start_date": card.start_date.isoformat() if card.start_date else None,
         "due_date": card.due_date.isoformat() if card.due_date else None,
-        "priority": card.priority, "priority_name": PRIO_MAP.get(card.priority, "N/A")
+        "priority": card.priority, "priority_name": PRIO_MAP.get(card.priority, "N/A"),
+        "is_archived": card.is_archived,
+        "labels": [label_to_dict(label) for label in card.labels]
     }
 
 def column_to_dict(col: Column) -> Dict:
     return {
         "id": col.id, "title": col.title, "position": col.position,
-        "cards": sorted([card_to_dict(c) for c in col.cards], key=lambda x: x["position"])
+        "cards": sorted([card_to_dict(c) for c in col.cards if not c.is_archived], key=lambda x: x["position"])
+    }
+
+def board_to_dict(board: Board) -> Dict:
+    return {
+        "id": board.id,
+        "name": board.name,
+        "description": board.description,
+        "created_at": board.created_at.isoformat() if board.created_at else None,
+        "updated_at": board.updated_at.isoformat() if board.updated_at else None,
+        "is_active": board.is_active,
+        "columns": sorted([column_to_dict(c) for c in board.columns], key=lambda x: x["position"]),
+        "labels": [label_to_dict(label) for label in board.labels]
+    }
+
+def label_to_dict(label: Label) -> Dict:
+    return {
+        "id": label.id,
+        "name": label.name,
+        "color": label.color
     }
 
 # API routes
 # ────────────────────────────────────────────────────────────────────────────────
+@app.get("/api/boards")
+def api_boards():
+    app.logger.debug("GET /api/boards called")
+    boards = Board.query.filter_by(is_active=True).all()
+    return jsonify([{"id": b.id, "name": b.name, "description": b.description} for b in boards])
+
+@app.post("/api/boards")
+def api_create_board():
+    app.logger.debug("POST /api/boards called")
+    data = request.json or {}
+    name = data.get("name", "New Board")
+    description = data.get("description", "")
+    
+    board = Board(name=name, description=description)
+    db.session.add(board)
+    db.session.flush()
+    
+    # Add default columns
+    default_columns = ["Backlog", "To Do", "In Progress", "Done"]
+    for i, t in enumerate(default_columns):
+        db.session.add(Column(title=t, position=i, board_id=board.id))
+    
+    db.session.commit()
+    return jsonify(board_to_dict(board))
+
+@app.put("/api/boards/<int:board_id>")
+def api_update_board(board_id):
+    app.logger.debug(f"PUT /api/boards/{board_id} called")
+    board = Board.query.get_or_404(board_id)
+    data = request.json or {}
+    
+    if "name" in data:
+        board.name = data["name"]
+    if "description" in data:
+        board.description = data["description"]
+    
+    board.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(board_to_dict(board))
+
+@app.delete("/api/boards/<int:board_id>")
+def api_delete_board(board_id):
+    app.logger.debug(f"DELETE /api/boards/{board_id} called")
+    board = Board.query.get_or_404(board_id)
+    
+    # Don't delete the last board
+    if Board.query.filter_by(is_active=True).count() <= 1:
+        return jsonify({"error": "Cannot delete the last board"}), 400
+    
+    board.is_active = False
+    board.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({"success": True})
+
+@app.get("/api/board/<int:board_id>")
+def api_board_data(board_id):
+    app.logger.debug(f"GET /api/board/{board_id} called")
+    b = Board.query.get_or_404(board_id)
+    return jsonify(board_to_dict(b))
+
+# Legacy endpoint for backward compatibility
 @app.get("/api/board")
-def api_board_data(): # Renamed to avoid conflict with model name
-    app.logger.debug("GET /api/board called")
+def api_board_data_legacy():
+    app.logger.debug("GET /api/board called (legacy)")
     b = Board.query.first()
+    if not b: return jsonify({"error": "Board not found"}), 404
+    # Ensure columns are ordered by position for consistent display
+    ordered_columns = sorted([column_to_dict(c) for c in b.columns], key=lambda x: x["position"])
+    return jsonify({"id": b.id, "name": b.name, "columns": ordered_columns})
+
+
+@app.get("/api/board/<int:board_id>")
+def api_board_data_by_id(board_id):
+    app.logger.debug(f"GET /api/board/{board_id} called")
+    b = Board.query.get(board_id)
     if not b: return jsonify({"error": "Board not found"}), 404
     # Ensure columns are ordered by position for consistent display
     ordered_columns = sorted([column_to_dict(c) for c in b.columns], key=lambda x: x["position"])
@@ -234,8 +357,16 @@ def api_metrics():
 @app.post("/api/column")
 def api_add_column():
     app.logger.debug("POST /api/column called")
-    title = (request.json or {}).get("title", "Untitled")
-    board = Board.query.first()
+    data = request.json or {}
+    title = data.get("title", "Untitled")
+    board_id = data.get("board_id")
+    
+    # If no board_id provided, use the first board for backward compatibility
+    if board_id:
+        board = Board.query.get(board_id)
+    else:
+        board = Board.query.first()
+        
     if not board:
         app.logger.warning("/api/column: Board not found")
         return jsonify({"error": "Board not found, cannot add column"}), 404
@@ -247,6 +378,87 @@ def api_add_column():
     db.session.add(col); db.session.commit()
     app.logger.info(f"/api/column: Column '{title}' added at position {new_pos}.")
     return jsonify(column_to_dict(col)), 201
+
+# Label endpoints
+@app.get("/api/boards/<int:board_id>/labels")
+def api_get_labels(board_id):
+    app.logger.debug(f"GET /api/boards/{board_id}/labels called")
+    board = Board.query.get_or_404(board_id)
+    return jsonify([label_to_dict(label) for label in board.labels])
+
+@app.post("/api/boards/<int:board_id>/labels")
+def api_create_label(board_id):
+    app.logger.debug(f"POST /api/boards/{board_id}/labels called")
+    board = Board.query.get_or_404(board_id)
+    data = request.json or {}
+    
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "Label name is required"}), 400
+    
+    color = data.get("color", "#808080")  # Default gray
+    if not color.startswith("#") or len(color) != 7:
+        return jsonify({"error": "Color must be in hex format (#RRGGBB)"}), 400
+    
+    label = Label(name=name, color=color, board_id=board_id)
+    db.session.add(label)
+    db.session.commit()
+    
+    return jsonify(label_to_dict(label)), 201
+
+@app.put("/api/labels/<int:label_id>")
+def api_update_label(label_id):
+    app.logger.debug(f"PUT /api/labels/{label_id} called")
+    label = Label.query.get_or_404(label_id)
+    data = request.json or {}
+    
+    if "name" in data:
+        name = data["name"].strip()
+        if not name:
+            return jsonify({"error": "Label name cannot be empty"}), 400
+        label.name = name
+    
+    if "color" in data:
+        color = data["color"]
+        if not color.startswith("#") or len(color) != 7:
+            return jsonify({"error": "Color must be in hex format (#RRGGBB)"}), 400
+        label.color = color
+    
+    db.session.commit()
+    return jsonify(label_to_dict(label))
+
+@app.delete("/api/labels/<int:label_id>")
+def api_delete_label(label_id):
+    app.logger.debug(f"DELETE /api/labels/{label_id} called")
+    label = Label.query.get_or_404(label_id)
+    db.session.delete(label)
+    db.session.commit()
+    return jsonify({"success": True})
+
+# Archive endpoints
+@app.get("/api/cards/archived")
+def api_get_archived_cards():
+    app.logger.debug("GET /api/cards/archived called")
+    cards = Card.query.filter_by(is_archived=True).all()
+    return jsonify([card_to_dict(card) for card in cards])
+
+@app.post("/api/cards/<int:card_id>/archive")
+def api_archive_card(card_id):
+    app.logger.debug(f"POST /api/cards/{card_id}/archive called")
+    card = Card.query.get_or_404(card_id)
+    card.is_archived = True
+    card.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(card_to_dict(card))
+
+@app.post("/api/cards/<int:card_id>/unarchive")
+def api_unarchive_card(card_id):
+    app.logger.debug(f"POST /api/cards/{card_id}/unarchive called")
+    card = Card.query.get_or_404(card_id)
+    card.is_archived = False
+    card.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(card_to_dict(card))
 
 
 @app.post("/api/card")
@@ -278,7 +490,16 @@ def api_card(cid: int | None = None):
             start_date=parse_date(data.get("start_date")), due_date=parse_date(data.get("due_date")),
             priority=priority_val, 
         )
-        db.session.add(card); db.session.commit()
+        db.session.add(card)
+        db.session.flush()  # Get card ID before handling labels
+        
+        # Handle labels if provided
+        label_ids = data.get("label_ids", [])
+        if label_ids:
+            labels = Label.query.filter(Label.id.in_(label_ids)).all()
+            card.labels = labels
+        
+        db.session.commit()
         app.logger.info(f"/api/card (POST): Card '{card.title}' created with id {card.id}.")
         return jsonify(card_to_dict(card)), 201
     
@@ -310,7 +531,16 @@ def api_card(cid: int | None = None):
                 if priority_val not in PRIO_MAP.keys(): return jsonify({"error": f"Priority must be one of {list(PRIO_MAP.keys())}"}), 400
                 card.priority = priority_val
             except (ValueError, TypeError): return jsonify({"error": f"Priority must be an integer ({list(PRIO_MAP.keys())})"}), 400
-                
+    
+    # Handle labels update
+    if "label_ids" in data:
+        label_ids = data["label_ids"]
+        if label_ids:
+            labels = Label.query.filter(Label.id.in_(label_ids)).all()
+            card.labels = labels
+        else:
+            card.labels = []
+    
     db.session.commit()
     app.logger.info(f"/api/card (PATCH): Card {cid} updated.")
     return jsonify(card_to_dict(card))
@@ -387,11 +617,41 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
 .modal-actions button.primary:hover{background-color:#1d4ed8;}
 .modal-actions button.secondary{background-color:var(--button-secondary-bg);color:var(--button-secondary-text);border:1px solid var(--muted);}
 .modal-actions button.secondary:hover{background-color:var(--border-color);}
+
+/* Board Switcher Styles */
+.board-switcher{display:flex;align-items:center;gap:0.5rem;}
+.board-select{padding:0.375rem 0.75rem;border-radius:0.375rem;border:1px solid var(--muted);background:var(--input-bg);color:var(--text);font-size:0.875rem;min-width:150px;}
+#newBoardBtn{font-size:0.875rem;padding:0.375rem 0.75rem;}
+
+/* Labels Styles */
+.card-labels{display:flex;gap:0.25rem;flex-wrap:wrap;margin-top:0.5rem;}
+.label{display:inline-flex;align-items:center;padding:0.125rem 0.5rem;border-radius:0.25rem;font-size:0.75rem;font-weight:500;color:#fff;}
+.label-picker{display:flex;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.75rem;}
+.label-picker .label-option{display:flex;align-items:center;gap:0.25rem;padding:0.25rem;cursor:pointer;border-radius:0.25rem;}
+.label-picker .label-option:hover{background:var(--card-bg);}
+.label-picker input[type="checkbox"]{margin:0;}
+#manageLabelsBtnEl{font-size:0.75rem;padding:0.25rem 0.5rem;margin-top:0.5rem;}
+
+/* Archive Styles */
+.archived-banner{background:var(--muted);color:var(--surface);padding:0.5rem 1rem;text-align:center;font-size:0.875rem;}
+#viewArchivedBtn{margin-left:1rem;font-size:0.875rem;padding:0.25rem 0.75rem;}
+.archive-btn{font-size:0.75rem;padding:0.25rem 0.5rem;margin-top:0.5rem;background:var(--card-bg);}
+
+/* Keyboard Shortcuts Modal */
+.shortcuts-grid{display:grid;grid-template-columns:auto 1fr;gap:0.5rem 1rem;}
+.shortcut-key{background:var(--card-bg);padding:0.25rem 0.5rem;border-radius:0.25rem;font-family:monospace;font-size:0.875rem;font-weight:600;}
 </style></head><body>
 <header>
-  <h1>{{ board_name }}</h1>
+  <div class="board-switcher">
+    <select id="boardSelect" class="board-select">
+      <!-- Boards will be loaded here -->
+    </select>
+    <button id="newBoardBtn" class="primary">＋ Board</button>
+  </div>
   <div id="appControls">
     <button id='addColBtn'>＋ Column</button>
+    <button id='viewArchivedBtn'>📦 Archive</button>
+    <button id='keyboardShortcutsBtn'>⌨️</button>
     <button id='themeToggle' aria-label='Toggle theme'>🌓</button>
   </div>
 </header>
@@ -440,11 +700,99 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
         <label for="cardDueDateField">Due Date</label>
         <input type="date" id="cardDueDateField" name="due_date">
       </div>
+      <div>
+        <label>Labels</label>
+        <div id="labelPicker" class="label-picker">
+          <!-- Labels will be loaded here -->
+        </div>
+        <button type="button" id="manageLabelsBtnEl" class="secondary">Manage Labels</button>
+      </div>
       <div class="modal-actions">
         <button type="button" id="cancelCardModalBtnEl" class="secondary">Cancel</button>
+        <button type="button" id="archiveCardBtnEl" class="archive-btn" style="display:none;">Archive</button>
         <button type="submit" id="saveCardModalBtnEl" class="primary">Save Card</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Board Modal -->
+<div id="boardModalOverlay" class="modal-overlay">
+  <div class="modal">
+    <h2 id="boardModalTitle">New Board</h2>
+    <form id="boardModalForm" class="modal-form">
+      <input type="hidden" id="boardModalIdField">
+      <div>
+        <label for="boardNameField">Name</label>
+        <input type="text" id="boardNameField" name="name" required>
+      </div>
+      <div>
+        <label for="boardDescriptionField">Description</label>
+        <textarea id="boardDescriptionField" name="description"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="cancelBoardModalBtn" class="secondary">Cancel</button>
+        <button type="submit" id="saveBoardModalBtn" class="primary">Save Board</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Labels Modal -->
+<div id="labelsModalOverlay" class="modal-overlay">
+  <div class="modal">
+    <h2>Manage Labels</h2>
+    <form id="labelForm" class="modal-form">
+      <div>
+        <label for="labelNameField">Label Name</label>
+        <input type="text" id="labelNameField" required>
+      </div>
+      <div>
+        <label for="labelColorField">Color</label>
+        <input type="color" id="labelColorField" value="#808080">
+      </div>
+      <button type="submit" class="primary">Add Label</button>
+    </form>
+    <div id="existingLabels" style="margin-top: 1.5rem;">
+      <!-- Existing labels will be shown here -->
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="closeLabelModalBtn" class="secondary">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Archived Cards Modal -->
+<div id="archivedModalOverlay" class="modal-overlay">
+  <div class="modal" style="max-width: 800px;">
+    <h2>Archived Cards</h2>
+    <div id="archivedCardsList" style="max-height: 400px; overflow-y: auto;">
+      <!-- Archived cards will be shown here -->
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="closeArchivedModalBtn" class="secondary">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Keyboard Shortcuts Modal -->
+<div id="shortcutsModalOverlay" class="modal-overlay">
+  <div class="modal">
+    <h2>Keyboard Shortcuts</h2>
+    <div class="shortcuts-grid">
+      <span class="shortcut-key">n</span><span>New card</span>
+      <span class="shortcut-key">b</span><span>New board</span>
+      <span class="shortcut-key">c</span><span>New column</span>
+      <span class="shortcut-key">/</span><span>Focus search</span>
+      <span class="shortcut-key">Esc</span><span>Close modals</span>
+      <span class="shortcut-key">1-3</span><span>Set priority (in card modal)</span>
+      <span class="shortcut-key">?</span><span>Show shortcuts</span>
+      <span class="shortcut-key">a</span><span>Show archived cards</span>
+      <span class="shortcut-key">l</span><span>Manage labels</span>
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="closeShortcutsModalBtn" class="secondary">Close</button>
+    </div>
   </div>
 </div>
 
@@ -464,11 +812,18 @@ themeToggleBtn.onclick = () => {
   applyTheme(newTheme);
 };
 
+//── Global State
+let currentBoardId = 1;
+let boards = [];
+let labels = [];
+const filterState = { q: '', prio: '', from: '', to: '', showArchived: false };
+const PRIORITY_MAP_DISPLAY = {1: "High", 2: "Medium", 3: "Low"};
+
 //── DOM Elements
 const boardContainerEl = document.getElementById('boardContainer');
 const dashboardAreaEl = document.getElementById('dashboardArea');
-const filterState = { q: '', prio: '', from: '', to: '' };
-const PRIORITY_MAP_DISPLAY = {1: "High", 2: "Medium", 3: "Low"};
+const boardSelectEl = document.getElementById('boardSelect');
+const newBoardBtn = document.getElementById('newBoardBtn');
 
 // Card Modal Elements
 const cardModalOverlayEl = document.getElementById('cardModalOverlay');
@@ -482,6 +837,28 @@ const cardPriorityField = document.getElementById('cardPriorityField');
 const cardStartDateField = document.getElementById('cardStartDateField');
 const cardDueDateField = document.getElementById('cardDueDateField');
 const cancelCardBtn = document.getElementById('cancelCardModalBtnEl');
+const archiveCardBtn = document.getElementById('archiveCardBtnEl');
+const labelPickerEl = document.getElementById('labelPicker');
+
+// Board Modal Elements
+const boardModalOverlay = document.getElementById('boardModalOverlay');
+const boardModalForm = document.getElementById('boardModalForm');
+const boardNameField = document.getElementById('boardNameField');
+const boardDescriptionField = document.getElementById('boardDescriptionField');
+
+// Labels Modal Elements
+const labelsModalOverlay = document.getElementById('labelsModalOverlay');
+const labelForm = document.getElementById('labelForm');
+const labelNameField = document.getElementById('labelNameField');
+const labelColorField = document.getElementById('labelColorField');
+const existingLabelsEl = document.getElementById('existingLabels');
+
+// Archive Modal Elements
+const archivedModalOverlay = document.getElementById('archivedModalOverlay');
+const archivedCardsListEl = document.getElementById('archivedCardsList');
+
+// Shortcuts Modal
+const shortcutsModalOverlay = document.getElementById('shortcutsModalOverlay');
 
 // Chart instances
 let priorityPieChart = null;
@@ -517,7 +894,7 @@ const apiFetch = async (url, options = {}) => {
 async function refreshBoardAndMetrics() {
     try {
         const [boardData, metricsData] = await Promise.all([
-            apiFetch('/api/board'),
+            apiFetch(currentBoardId ? `/api/board/${currentBoardId}` : '/api/board'),
             apiFetch('/api/metrics')
         ]);
         if (boardData) renderBoardUI(boardData);
@@ -679,6 +1056,16 @@ function createCardElement(card) {
     if (card.description) {
         cardHTML += `<p>${card.description.substring(0, 100) + (card.description.length > 100 ? '...' : '')}</p>`;
     }
+    
+    // Add labels
+    if (card.labels && card.labels.length > 0) {
+        cardHTML += `<div class="card-labels">
+            ${card.labels.map(label => 
+                `<span class="label" style="background-color: ${label.color}">${label.name}</span>`
+            ).join('')}
+        </div>`;
+    }
+    
     cardHTML += `<div class="meta">
                     <span>Priority: ${PRIORITY_MAP_DISPLAY[card.priority] || 'N/A'}</span>`;
     if (card.due_date) {
@@ -695,6 +1082,8 @@ function createCardElement(card) {
 //── Card Modal Logic
 function openCardModal(card = null, columnId = null) {
     cardModalForm.reset();
+    const isEdit = !!card;
+    
     if (card) {
         cardModalTitle.textContent = 'Edit Card';
         cardModalIdField.value = card.id;
@@ -710,6 +1099,23 @@ function openCardModal(card = null, columnId = null) {
         cardModalColumnIdField.value = columnId;
         cardPriorityField.value = '2'; 
     }
+    
+    // Show/hide archive button
+    if (archiveCardBtn) {
+        archiveCardBtn.style.display = isEdit ? 'inline-block' : 'none';
+    }
+    
+    // Render label picker
+    renderLabelPicker();
+    
+    // Check labels for this card
+    if (card?.labels) {
+        const labelIds = card.labels.map(l => l.id);
+        labelPickerEl.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
+            checkbox.checked = labelIds.includes(parseInt(checkbox.value));
+        });
+    }
+    
     cardModalOverlayEl.style.display = 'flex';
     cardTitleField.focus();
 }
@@ -726,13 +1132,18 @@ cardModalForm.onsubmit = async (e) => {
     const title = cardTitleField.value.trim();
     if (!title) { alert("Title is required."); cardTitleField.focus(); return; }
 
+    // Get selected label IDs
+    const selectedLabels = labelPickerEl ? Array.from(labelPickerEl.querySelectorAll('input[type="checkbox"]:checked'))
+        .map(cb => parseInt(cb.value)) : [];
+    
     const cardData = {
         title: title,
         description: cardDescriptionField.value.trim(),
         priority: parseInt(cardPriorityField.value, 10),
         start_date: cardStartDateField.value || null,
         due_date: cardDueDateField.value || null,
-        column_id: parseInt(cardModalColumnIdField.value, 10)
+        column_id: parseInt(cardModalColumnIdField.value, 10),
+        label_ids: selectedLabels
     };
 
     try {
@@ -797,13 +1208,266 @@ document.getElementById('addColBtn').onclick = async () => {
     const name = prompt('New column title:');
     if (!name || !name.trim()) return;
     try {
-        await apiFetch('/api/column', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name.trim() }) });
+        await apiFetch('/api/column', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name.trim(), board_id: currentBoardId }) });
         refreshBoardAndMetrics();
     } catch (err) { console.error("Failed to add column:", err); }
 };
 
+//── Board Management
+async function loadBoards() {
+    try {
+        boards = await apiFetch('/api/boards');
+        boardSelectEl.innerHTML = '';
+        boards.forEach(board => {
+            const option = document.createElement('option');
+            option.value = board.id;
+            option.textContent = board.name;
+            option.selected = board.id === currentBoardId;
+            boardSelectEl.appendChild(option);
+        });
+        
+        // Load saved board or first board
+        const savedBoardId = localStorage.getItem('currentBoardId');
+        const boardToLoad = savedBoardId && boards.find(b => b.id == savedBoardId) 
+            ? savedBoardId 
+            : boards[0]?.id;
+        
+        if (boardToLoad) {
+            currentBoardId = parseInt(boardToLoad);
+            boardSelectEl.value = currentBoardId;
+        }
+    } catch (err) {
+        console.error("Failed to load boards:", err);
+    }
+}
+
+async function switchBoard(boardId) {
+    currentBoardId = parseInt(boardId);
+    localStorage.setItem('currentBoardId', currentBoardId);
+    
+    try {
+        const [boardData, metricsData] = await Promise.all([
+            apiFetch(`/api/board/${currentBoardId}`),
+            apiFetch('/api/metrics')
+        ]);
+        
+        await loadLabels();
+        renderBoardUI(boardData);
+        renderDashboardUI(metricsData);
+        applyFiltersUI();
+    } catch (err) {
+        console.error("Failed to switch board:", err);
+    }
+}
+
+boardSelectEl.addEventListener('change', (e) => {
+    switchBoard(e.target.value);
+});
+
+newBoardBtn.addEventListener('click', async () => {
+    const name = prompt('New board name:');
+    if (!name) return;
+    try {
+        const newBoard = await apiFetch('/api/boards', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim() })
+        });
+        currentBoardId = newBoard.id;
+        await loadBoards();
+        await switchBoard(currentBoardId);
+    } catch (err) {
+        console.error("Failed to create board:", err);
+    }
+});
+
+//── Archive Management
+async function showArchivedCards() {
+    archivedModalOverlay.style.display = 'flex';
+    try {
+        const archivedCards = await apiFetch('/api/cards/archived');
+        archivedCardsListEl.innerHTML = archivedCards.length === 0 
+            ? '<p style="text-align: center; color: var(--muted);">No archived cards</p>'
+            : archivedCards.map(card => `
+                <div class="card" data-prio="${card.priority}" style="margin-bottom: 0.75rem;">
+                    <strong>${card.title}</strong>
+                    ${card.description ? `<p>${card.description}</p>` : ''}
+                    <div class="card-labels">
+                        ${card.labels.map(label => 
+                            `<span class="label" style="background-color: ${label.color}">${label.name}</span>`
+                        ).join('')}
+                    </div>
+                    <div class="meta">
+                        <span>${card.priority_name} Priority</span>
+                        <button onclick="unarchiveCard(${card.id})" class="primary" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">Restore</button>
+                    </div>
+                </div>
+            `).join('');
+    } catch (err) {
+        console.error("Failed to load archived cards:", err);
+    }
+}
+
+async function archiveCard(cardId) {
+    try {
+        await apiFetch(`/api/cards/${cardId}/archive`, { method: 'POST' });
+        cardModalOverlayEl.style.display = 'none';
+        await refreshBoardAndMetrics();
+    } catch (err) {
+        console.error("Failed to archive card:", err);
+    }
+}
+
+async function unarchiveCard(cardId) {
+    try {
+        await apiFetch(`/api/cards/${cardId}/unarchive`, { method: 'POST' });
+        await showArchivedCards();
+        await refreshBoardAndMetrics();
+    } catch (err) {
+        console.error("Failed to unarchive card:", err);
+    }
+}
+
+//── Label Management
+async function loadLabels() {
+    try {
+        labels = await apiFetch(`/api/boards/${currentBoardId}/labels`);
+        renderLabelPicker();
+    } catch (err) {
+        console.error("Failed to load labels:", err);
+    }
+}
+
+function renderLabelPicker() {
+    if (!labelPickerEl) return;
+    labelPickerEl.innerHTML = labels.map(label => `
+        <label class="label-option">
+            <input type="checkbox" value="${label.id}" name="labels">
+            <span class="label" style="background-color: ${label.color}">${label.name}</span>
+        </label>
+    `).join('');
+}
+
+async function showLabelsModal() {
+    labelsModalOverlay.style.display = 'flex';
+    await loadExistingLabels();
+}
+
+async function loadExistingLabels() {
+    existingLabelsEl.innerHTML = '<h3>Existing Labels</h3>' + labels.map(label => `
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+            <span class="label" style="background-color: ${label.color}">${label.name}</span>
+            <button onclick="deleteLabel(${label.id})" class="secondary" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">Delete</button>
+        </div>
+    `).join('');
+}
+
+async function createLabel(event) {
+    event.preventDefault();
+    const data = {
+        name: labelNameField.value.trim(),
+        color: labelColorField.value
+    };
+    
+    try {
+        await apiFetch(`/api/boards/${currentBoardId}/labels`, {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        
+        labelNameField.value = '';
+        labelColorField.value = '#808080';
+        
+        await loadLabels();
+        await loadExistingLabels();
+    } catch (err) {
+        console.error("Failed to create label:", err);
+    }
+}
+
+async function deleteLabel(labelId) {
+    if (!confirm('Are you sure you want to delete this label?')) return;
+    
+    try {
+        await apiFetch(`/api/labels/${labelId}`, { method: 'DELETE' });
+        await loadLabels();
+        await loadExistingLabels();
+    } catch (err) {
+        console.error("Failed to delete label:", err);
+    }
+}
+
+//── Enhanced Modal Management
+document.getElementById('viewArchivedBtn').onclick = showArchivedCards;
+document.getElementById('manageLabelsBtnEl').onclick = showLabelsModal;
+document.getElementById('closeArchivedModalBtn').onclick = () => archivedModalOverlay.style.display = 'none';
+document.getElementById('closeLabelModalBtn').onclick = () => labelsModalOverlay.style.display = 'none';
+document.getElementById('closeShortcutsModalBtn').onclick = () => shortcutsModalOverlay.style.display = 'none';
+
+// Archive button functionality
+archiveCardBtn.onclick = () => {
+    const cardId = cardModalIdField.value;
+    if (cardId) archiveCard(cardId);
+};
+
+// Label form submission
+labelForm.onsubmit = createLabel;
+
+// Close modals on outside click
+[archivedModalOverlay, labelsModalOverlay, shortcutsModalOverlay].forEach(overlay => {
+    overlay.onclick = (e) => {
+        if (e.target === overlay) overlay.style.display = 'none';
+    };
+});
+
+//── Keyboard Shortcuts
+document.addEventListener('keydown', (e) => {
+    if (e.target.matches('input, textarea, select')) {
+        if (cardModalOverlayEl.style.display === 'flex' && e.key >= '1' && e.key <= '3') {
+            cardPriorityField.value = e.key;
+            e.preventDefault();
+        }
+        return;
+    }
+    
+    switch(e.key) {
+        case 'n':
+            e.preventDefault();
+            openCardModal();
+            break;
+        case 'a':
+            e.preventDefault();
+            showArchivedCards();
+            break;
+        case 'l':
+            e.preventDefault();
+            showLabelsModal();
+            break;
+        case '?':
+            e.preventDefault();
+            shortcutsModalOverlay.style.display = 'flex';
+            break;
+        case 'Escape':
+            document.querySelectorAll('.modal-overlay').forEach(modal => {
+                modal.style.display = 'none';
+            });
+            break;
+    }
+});
+
+// Export functions for inline onclick handlers
+window.deleteLabel = deleteLabel;
+window.unarchiveCard = unarchiveCard;
+
+//── Enhanced Initialization
+async function initializeApp() {
+    await loadBoards();
+    await loadLabels();
+    await refreshBoardAndMetrics();
+}
+
 //── Initial Load
-refreshBoardAndMetrics();
+initializeApp();
 </script></body></html>
 """
 
