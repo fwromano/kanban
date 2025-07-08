@@ -5,7 +5,7 @@ import sqlite3
 from datetime import date, datetime, timedelta # Added timedelta
 from typing import Dict, List, Any # Added List, Any
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, send_file
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import scoped_session, sessionmaker 
 
@@ -76,6 +76,91 @@ def ensure_columns() -> None:
     finally:
         if conn: conn.close()
 
+def ensure_phase2_tables() -> None:
+    """Create Phase 2 tables if they don't exist"""
+    if not DB_URI.startswith("sqlite:///"):
+        return
+    path = DB_URI.replace("sqlite:///", "", 1)
+    if not os.path.exists(path):
+        return
+    
+    app.logger.info("Auto-migration: Checking Phase 2 tables")
+    conn = None
+    try:
+        conn = sqlite3.connect(path)
+        cur = conn.cursor()
+        
+        # Check and create checklist table
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checklist';")
+        if not cur.fetchone():
+            app.logger.info("Auto-migration: Creating checklist table")
+            cur.execute("""
+                CREATE TABLE checklist (
+                    id INTEGER PRIMARY KEY,
+                    card_id INTEGER NOT NULL,
+                    title VARCHAR(200) NOT NULL,
+                    position INTEGER DEFAULT 0,
+                    FOREIGN KEY (card_id) REFERENCES card(id)
+                )
+            """)
+        
+        # Check and create checklist_item table
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checklist_item';")
+        if not cur.fetchone():
+            app.logger.info("Auto-migration: Creating checklist_item table")
+            cur.execute("""
+                CREATE TABLE checklist_item (
+                    id INTEGER PRIMARY KEY,
+                    checklist_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    is_checked BOOLEAN DEFAULT 0,
+                    position INTEGER DEFAULT 0,
+                    FOREIGN KEY (checklist_id) REFERENCES checklist(id)
+                )
+            """)
+        
+        # Check and create attachment table
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='attachment';")
+        if not cur.fetchone():
+            app.logger.info("Auto-migration: Creating attachment table")
+            cur.execute("""
+                CREATE TABLE attachment (
+                    id INTEGER PRIMARY KEY,
+                    card_id INTEGER NOT NULL,
+                    filename VARCHAR(255) NOT NULL,
+                    original_filename VARCHAR(255) NOT NULL,
+                    file_path VARCHAR(500) NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    mime_type VARCHAR(100) NOT NULL,
+                    uploaded_at DATETIME,
+                    FOREIGN KEY (card_id) REFERENCES card(id)
+                )
+            """)
+        
+        # Check and create card_template table
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='card_template';")
+        if not cur.fetchone():
+            app.logger.info("Auto-migration: Creating card_template table")
+            cur.execute("""
+                CREATE TABLE card_template (
+                    id INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    description TEXT,
+                    template_data TEXT NOT NULL,
+                    created_at DATETIME,
+                    board_id INTEGER NOT NULL,
+                    FOREIGN KEY (board_id) REFERENCES board(id)
+                )
+            """)
+        
+        conn.commit()
+        app.logger.info("Auto-migration: Phase 2 tables created successfully")
+    except sqlite3.Error as e:
+        app.logger.error(f"Auto-migration: SQLite error creating Phase 2 tables: {e}")
+        if conn: conn.rollback()
+    finally:
+        if conn: conn.close()
+
 # ORM models
 # ────────────────────────────────────────────────────────────────────────────────
 class Board(db.Model):
@@ -108,6 +193,8 @@ class Card(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     column_id = db.Column(db.Integer, db.ForeignKey("column.id"))
     labels = db.relationship("Label", secondary="card_labels", backref="cards")
+    checklists = db.relationship("Checklist", backref="card", cascade="all, delete-orphan", order_by="Checklist.position")
+    attachments = db.relationship("Attachment", backref="card", cascade="all, delete-orphan", order_by="Attachment.uploaded_at")
 
 class Label(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -120,11 +207,45 @@ card_labels = db.Table('card_labels',
     db.Column('label_id', db.Integer, db.ForeignKey('label.id'), primary_key=True)
 )
 
+# Phase 2 Models
+class Checklist(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    card_id = db.Column(db.Integer, db.ForeignKey('card.id'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    position = db.Column(db.Integer, default=0)
+    items = db.relationship('ChecklistItem', backref='checklist', cascade='all, delete-orphan', order_by='ChecklistItem.position')
+
+class ChecklistItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    checklist_id = db.Column(db.Integer, db.ForeignKey('checklist.id'), nullable=False)
+    text = db.Column(db.Text, nullable=False)
+    is_checked = db.Column(db.Boolean, default=False)
+    position = db.Column(db.Integer, default=0)
+
+class Attachment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    card_id = db.Column(db.Integer, db.ForeignKey('card.id'), nullable=False)
+    filename = db.Column(db.String(255), nullable=False)
+    original_filename = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(500), nullable=False)
+    file_size = db.Column(db.Integer, nullable=False)
+    mime_type = db.Column(db.String(100), nullable=False)
+    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class CardTemplate(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text)
+    template_data = db.Column(db.Text, nullable=False)  # JSON string
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    board_id = db.Column(db.Integer, db.ForeignKey('board.id'), nullable=False)
+
 # DB init / seed
 # ────────────────────────────────────────────────────────────────────────────────
 with app.app_context():
     app.logger.info("Entered app_context for DB initialization.")
-    ensure_columns() 
+    ensure_columns()
+    ensure_phase2_tables() 
     db.init_app(app)
     app.logger.info("SQLAlchemy initialized.")
     db.create_all()
@@ -170,7 +291,9 @@ def card_to_dict(card: Card) -> Dict:
         "due_date": card.due_date.isoformat() if card.due_date else None,
         "priority": card.priority, "priority_name": PRIO_MAP.get(card.priority, "N/A"),
         "is_archived": card.is_archived,
-        "labels": [label_to_dict(label) for label in card.labels]
+        "labels": [label_to_dict(label) for label in card.labels],
+        "checklists": [checklist_to_dict(checklist) for checklist in card.checklists],
+        "attachments": [attachment_to_dict(attachment) for attachment in card.attachments]
     }
 
 def column_to_dict(col: Column) -> Dict:
@@ -196,6 +319,40 @@ def label_to_dict(label: Label) -> Dict:
         "id": label.id,
         "name": label.name,
         "color": label.color
+    }
+
+def checklist_to_dict(checklist: Checklist) -> Dict:
+    return {
+        "id": checklist.id,
+        "title": checklist.title,
+        "position": checklist.position,
+        "items": [checklist_item_to_dict(item) for item in checklist.items]
+    }
+
+def checklist_item_to_dict(item: ChecklistItem) -> Dict:
+    return {
+        "id": item.id,
+        "text": item.text,
+        "is_checked": item.is_checked,
+        "position": item.position
+    }
+
+def attachment_to_dict(attachment: Attachment) -> Dict:
+    return {
+        "id": attachment.id,
+        "filename": attachment.filename,
+        "original_filename": attachment.original_filename,
+        "file_size": attachment.file_size,
+        "mime_type": attachment.mime_type,
+        "uploaded_at": attachment.uploaded_at.isoformat() if attachment.uploaded_at else None
+    }
+
+def card_template_to_dict(template: CardTemplate) -> Dict:
+    return {
+        "id": template.id,
+        "name": template.name,
+        "description": template.description,
+        "created_at": template.created_at.isoformat() if template.created_at else None
     }
 
 # API routes
@@ -284,15 +441,40 @@ def api_board_data_by_id(board_id):
 @app.get("/api/metrics")
 def api_metrics():
     app.logger.debug("GET /api/metrics called")
+    # Get current board (default to first board for legacy compatibility)
+    current_board = Board.query.first()
+    if not current_board:
+        return jsonify({"error": "No board found"}), 404
+    
+    return _get_board_metrics(current_board.id)
+
+@app.get("/api/metrics/<int:board_id>")
+def api_metrics_board(board_id):
+    app.logger.debug(f"GET /api/metrics/{board_id} called")
+    current_board = Board.query.get(board_id)
+    if not current_board:
+        return jsonify({"error": "Board not found"}), 404
+    
+    return _get_board_metrics(board_id)
+
+def _get_board_metrics(board_id):
+    current_board = Board.query.get(board_id)
+    if not current_board:
+        return jsonify({"error": "Board not found"}), 404
+    
     today = date.today()
     next_7_days_end = today + timedelta(days=7)
 
-    total_cards_count = Card.query.count()
-    total_columns_count = Column.query.count()
+    # Filter cards by current board, excluding archived cards
+    board_cards_query = Card.query.join(Column).filter(Column.board_id == current_board.id, Card.is_archived == False)
+    board_columns = Column.query.filter_by(board_id=current_board.id)
+    
+    total_cards_count = board_cards_query.count()
+    total_columns_count = board_columns.count()
     
     avg_cards_per_column = (total_cards_count / total_columns_count) if total_columns_count > 0 else 0
 
-    priority_counts = {p_val: Card.query.filter_by(priority=p_val).count() for p_val in PRIO_MAP.keys()}
+    priority_counts = {p_val: board_cards_query.filter(Card.priority == p_val).count() for p_val in PRIO_MAP.keys()}
     # Ensure all priorities are present in percentages, even if count is 0
     priority_percentages = {}
     for p_val, p_name in PRIO_MAP.items():
@@ -301,31 +483,30 @@ def api_metrics():
 
     priority_counts_named = {PRIO_MAP[p_val]: count for p_val, count in priority_counts.items()}
 
-
-    overdue_cards_count = Card.query.filter(Card.due_date != None, Card.due_date < today).count()
-    overdue_high_priority_count = Card.query.filter(
+    overdue_cards_count = board_cards_query.filter(Card.due_date != None, Card.due_date < today).count()
+    overdue_high_priority_count = board_cards_query.filter(
         Card.priority == 1, Card.due_date != None, Card.due_date < today
     ).count()
     
-    cards_due_today_count = Card.query.filter(Card.due_date == today).count()
-    cards_due_next_7_days_count = Card.query.filter(
+    cards_due_today_count = board_cards_query.filter(Card.due_date == today).count()
+    cards_due_next_7_days_count = board_cards_query.filter(
         Card.due_date != None, Card.due_date >= today, Card.due_date < next_7_days_end
     ).count()
 
-    done_column = Column.query.filter(Column.title.ilike("Done")).first()
+    done_column = board_columns.filter(Column.title.ilike("Done")).first()
     if not done_column: 
-        done_column = Column.query.order_by(Column.position.desc()).first()
+        done_column = board_columns.order_by(Column.position.desc()).first()
 
     cards_in_done_column_count = 0
     if done_column:
-        cards_in_done_column_count = Card.query.filter_by(column_id=done_column.id).count()
+        cards_in_done_column_count = board_cards_query.filter(Card.column_id == done_column.id).count()
     
     active_cards_count = total_cards_count - cards_in_done_column_count
     
-    all_columns = Column.query.order_by(Column.position).all()
+    all_columns = board_columns.order_by(Column.position).all()
     column_details: List[Dict[str, Any]] = []
     for col in all_columns:
-        card_count_in_col = len(col.cards) 
+        card_count_in_col = board_cards_query.filter(Card.column_id == col.id).count()
         percentage = (card_count_in_col / total_cards_count * 100) if total_cards_count > 0 else 0
         column_details.append({
             "name": col.title,
@@ -553,6 +734,243 @@ def api_delete_card(cid):
     app.logger.info(f"/api/card (DELETE): Card {cid} deleted.")
     return "", 204
 
+# Phase 2 API Endpoints
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Checklist endpoints
+@app.get("/api/cards/<int:card_id>/checklists")
+def api_get_checklists(card_id):
+    app.logger.debug(f"GET /api/cards/{card_id}/checklists called")
+    card = Card.query.get_or_404(card_id)
+    return jsonify([checklist_to_dict(checklist) for checklist in card.checklists])
+
+@app.post("/api/cards/<int:card_id>/checklists")
+def api_create_checklist(card_id):
+    app.logger.debug(f"POST /api/cards/{card_id}/checklists called")
+    card = Card.query.get_or_404(card_id)
+    data = request.json or {}
+    title = data.get("title", "New Checklist")
+    position = data.get("position", len(card.checklists))
+    
+    checklist = Checklist(card_id=card_id, title=title, position=position)
+    db.session.add(checklist)
+    db.session.commit()
+    
+    return jsonify(checklist_to_dict(checklist)), 201
+
+@app.put("/api/checklists/<int:checklist_id>")
+def api_update_checklist(checklist_id):
+    app.logger.debug(f"PUT /api/checklists/{checklist_id} called")
+    checklist = Checklist.query.get_or_404(checklist_id)
+    data = request.json or {}
+    
+    if "title" in data:
+        checklist.title = data["title"]
+    if "position" in data:
+        checklist.position = data["position"]
+    
+    db.session.commit()
+    return jsonify(checklist_to_dict(checklist))
+
+@app.delete("/api/checklists/<int:checklist_id>")
+def api_delete_checklist(checklist_id):
+    app.logger.debug(f"DELETE /api/checklists/{checklist_id} called")
+    checklist = Checklist.query.get_or_404(checklist_id)
+    db.session.delete(checklist)
+    db.session.commit()
+    return "", 204
+
+# Checklist item endpoints
+@app.post("/api/checklists/<int:checklist_id>/items")
+def api_create_checklist_item(checklist_id):
+    app.logger.debug(f"POST /api/checklists/{checklist_id}/items called")
+    checklist = Checklist.query.get_or_404(checklist_id)
+    data = request.json or {}
+    text = data.get("text", "")
+    position = data.get("position", len(checklist.items))
+    
+    item = ChecklistItem(checklist_id=checklist_id, text=text, position=position)
+    db.session.add(item)
+    db.session.commit()
+    
+    return jsonify(checklist_item_to_dict(item)), 201
+
+@app.put("/api/checklist-items/<int:item_id>")
+def api_update_checklist_item(item_id):
+    app.logger.debug(f"PUT /api/checklist-items/{item_id} called")
+    item = ChecklistItem.query.get_or_404(item_id)
+    data = request.json or {}
+    
+    if "text" in data:
+        item.text = data["text"]
+    if "is_checked" in data:
+        item.is_checked = data["is_checked"]
+    if "position" in data:
+        item.position = data["position"]
+    
+    db.session.commit()
+    return jsonify(checklist_item_to_dict(item))
+
+@app.delete("/api/checklist-items/<int:item_id>")
+def api_delete_checklist_item(item_id):
+    app.logger.debug(f"DELETE /api/checklist-items/{item_id} called")
+    item = ChecklistItem.query.get_or_404(item_id)
+    db.session.delete(item)
+    db.session.commit()
+    return "", 204
+
+# Attachment endpoints
+@app.post("/api/cards/<int:card_id>/attachments")
+def api_upload_attachment(card_id):
+    app.logger.debug(f"POST /api/cards/{card_id}/attachments called")
+    card = Card.query.get_or_404(card_id)
+    
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+    
+    # Create uploads directory if it doesn't exist
+    upload_dir = "uploads"
+    if not os.path.exists(upload_dir):
+        os.makedirs(upload_dir)
+    
+    # Generate unique filename
+    import uuid
+    file_ext = os.path.splitext(file.filename)[1]
+    filename = f"{uuid.uuid4()}{file_ext}"
+    file_path = os.path.join(upload_dir, filename)
+    
+    # Save file
+    file.save(file_path)
+    
+    # Create attachment record
+    attachment = Attachment(
+        card_id=card_id,
+        filename=filename,
+        original_filename=file.filename,
+        file_path=file_path,
+        file_size=os.path.getsize(file_path),
+        mime_type=file.content_type or 'application/octet-stream'
+    )
+    db.session.add(attachment)
+    db.session.commit()
+    
+    return jsonify(attachment_to_dict(attachment)), 201
+
+@app.get("/api/attachments/<int:attachment_id>/download")
+def api_download_attachment(attachment_id):
+    app.logger.debug(f"GET /api/attachments/{attachment_id}/download called")
+    attachment = Attachment.query.get_or_404(attachment_id)
+    
+    if not os.path.exists(attachment.file_path):
+        return jsonify({"error": "File not found"}), 404
+    
+    return send_file(
+        attachment.file_path,
+        as_attachment=True,
+        download_name=attachment.original_filename,
+        mimetype=attachment.mime_type
+    )
+
+@app.delete("/api/attachments/<int:attachment_id>")
+def api_delete_attachment(attachment_id):
+    app.logger.debug(f"DELETE /api/attachments/{attachment_id} called")
+    attachment = Attachment.query.get_or_404(attachment_id)
+    
+    # Delete file from disk
+    if os.path.exists(attachment.file_path):
+        os.remove(attachment.file_path)
+    
+    db.session.delete(attachment)
+    db.session.commit()
+    return "", 204
+
+# Card template endpoints
+@app.get("/api/boards/<int:board_id>/templates")
+def api_get_card_templates(board_id):
+    app.logger.debug(f"GET /api/boards/{board_id}/templates called")
+    board = Board.query.get_or_404(board_id)
+    templates = CardTemplate.query.filter_by(board_id=board_id).all()
+    return jsonify([card_template_to_dict(template) for template in templates])
+
+@app.post("/api/boards/<int:board_id>/templates")
+def api_create_card_template(board_id):
+    app.logger.debug(f"POST /api/boards/{board_id}/templates called")
+    board = Board.query.get_or_404(board_id)
+    data = request.json or {}
+    
+    name = data.get("name", "New Template")
+    description = data.get("description", "")
+    template_data = data.get("template_data", "{}")
+    
+    template = CardTemplate(
+        name=name,
+        description=description,
+        template_data=template_data,
+        board_id=board_id
+    )
+    db.session.add(template)
+    db.session.commit()
+    
+    return jsonify(card_template_to_dict(template)), 201
+
+@app.delete("/api/templates/<int:template_id>")
+def api_delete_card_template(template_id):
+    app.logger.debug(f"DELETE /api/templates/{template_id} called")
+    template = CardTemplate.query.get_or_404(template_id)
+    db.session.delete(template)
+    db.session.commit()
+    return "", 204
+
+@app.post("/api/templates/<int:template_id>/create-card")
+def api_create_card_from_template(template_id):
+    app.logger.debug(f"POST /api/templates/{template_id}/create-card called")
+    template = CardTemplate.query.get_or_404(template_id)
+    data = request.json or {}
+    
+    column_id = data.get("column_id")
+    if not column_id:
+        return jsonify({"error": "column_id is required"}), 400
+    
+    # Parse template data
+    import json
+    template_data = json.loads(template.template_data)
+    
+    # Create card from template
+    card = Card(
+        title=template_data.get("title", "New Card"),
+        description=template_data.get("description", ""),
+        priority=template_data.get("priority", 2),
+        column_id=column_id
+    )
+    db.session.add(card)
+    db.session.commit()
+    
+    # Create checklists from template
+    for checklist_data in template_data.get("checklists", []):
+        checklist = Checklist(
+            card_id=card.id,
+            title=checklist_data["title"],
+            position=checklist_data["position"]
+        )
+        db.session.add(checklist)
+        db.session.commit()
+        
+        # Create checklist items
+        for item_data in checklist_data.get("items", []):
+            item = ChecklistItem(
+                checklist_id=checklist.id,
+                text=item_data["text"],
+                position=item_data["position"]
+            )
+            db.session.add(item)
+    
+    db.session.commit()
+    return jsonify(card_to_dict(card)), 201
+
 # TEMPLATE
 # ────────────────────────────────────────────────────────────────────────────────
 TEMPLATE = r"""
@@ -568,9 +986,45 @@ TEMPLATE = r"""
 [data-theme=dark]{--bg:#111827;--surface:#1f2937;--text:#f3f4f6;--muted:#9ca3af;--card-bg:#374151; --modal-bg: #1f2937; --input-bg: #374151; --button-secondary-bg: #374151; --border-color: #374151;
 --chart-high-prio: #f87171; --chart-medium-prio: #fbbf24; --chart-low-prio: #34d399; --chart-bar-bg: #3b82f6; --chart-grid-color: rgba(255,255,255,0.1);}
 html,body{height:100%;margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:16px;line-height:1.5;}
-header{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1.5rem;background:var(--surface);box-shadow:var(--shadow-sm);border-bottom:1px solid var(--border-color);}
-header h1 {font-size: 1.25rem; font-weight: 600; margin:0;}
-#appControls { display: flex; align-items: center; gap: 0.75rem;}
+/* Header Layout */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.5rem;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  border-bottom: 1px solid var(--border-color);
+  min-height: 3.5rem;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+header h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text);
+}
+
+/* Responsive header adjustments */
+@media (max-width: 768px) {
+  header {
+    padding: 0.5rem 1rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.75rem;
+  }
+  
+  .board-switcher {
+    justify-content: center;
+  }
+  
+  #appControls {
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+}
 .board{display:flex;gap:1rem;padding:1rem;overflow-x:auto;height:calc(100vh - 240px - 49px)} /* Adjusted for larger dashboard */
 .column{background:var(--surface);border-radius:.5rem;display:flex;flex-direction:column;min-width:300px;max-width:320px;max-height:100%; box-shadow: var(--shadow-md);}
 .column-header{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1rem;border-bottom:1px solid var(--border-color);font-weight:600; font-size: 1rem;}
@@ -583,14 +1037,331 @@ header h1 {font-size: 1.25rem; font-weight: 600; margin:0;}
 .card[data-prio="1"]{border-left:4px solid var(--high)}
 .card[data-prio="2"]{border-left:4px solid var(--med)}
 .card[data-prio="3"]{border-left:4px solid var(--low)}
-button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-size: 0.875rem; cursor: pointer; border: 1px solid transparent; font-weight:500; transition: background-color 0.2s ease, border-color 0.2s ease;}
-.add-card-btn{font-size:1.125rem;border:none;background:none;cursor:pointer;color:var(--muted); padding: 0.25rem; line-height:1;}
-#addColBtn{border:1px solid var(--muted);background:var(--surface); color: var(--text);}
-#addColBtn:hover{background:var(--card-bg);}
-.filter-bar{display:flex;flex-wrap:wrap;gap:.75rem;padding:0.75rem 1.5rem;background:var(--surface);border-bottom:1px solid var(--border-color);align-items:center;}
-.filter-bar input,.filter-bar select{padding:.375rem .75rem;border-radius:.375rem;border:1px solid var(--muted);background:var(--input-bg);color:var(--text); font-size:0.875rem;}
-.filter-bar label{font-size:0.875rem; color: var(--muted); display:flex; align-items:center; gap: 0.25rem;}
-#clearFilterBtn{border:1px solid var(--muted);background:var(--input-bg);color:var(--text)}
+/* Base Button Styles */
+button {
+  font-family: inherit;
+  border-radius: 0.375rem;
+  cursor: pointer;
+  border: 1px solid transparent;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  text-decoration: none;
+  outline: none;
+  font-size: 0.875rem;
+  padding: 0.5rem 1rem;
+  height: 2.5rem;
+  min-width: 2.5rem;
+  gap: 0.5rem;
+}
+
+/* Button Size Variants */
+.btn-xs {
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.25;
+}
+
+.btn-sm {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.875rem;
+  line-height: 1.25;
+}
+
+.btn-md {
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  line-height: 1.25;
+}
+
+.btn-lg {
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+/* Button Style Variants */
+.btn-primary {
+  background-color: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  border-color: var(--button-primary-bg);
+}
+
+.btn-primary:hover {
+  background-color: #1d4ed8;
+  border-color: #1d4ed8;
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-primary:active {
+  background-color: #1e40af;
+  border-color: #1e40af;
+  transform: translateY(1px);
+}
+
+.btn-secondary {
+  background-color: var(--button-secondary-bg);
+  color: var(--button-secondary-text);
+  border: 1px solid var(--border-color);
+}
+
+.btn-secondary:hover {
+  background-color: var(--card-bg);
+  border-color: var(--muted);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-secondary:active {
+  background-color: var(--border-color);
+  transform: translateY(1px);
+}
+
+.btn-outline {
+  background-color: transparent;
+  color: var(--text);
+  border: 1px solid var(--muted);
+}
+
+.btn-outline:hover {
+  background-color: var(--card-bg);
+  border-color: var(--text);
+}
+
+.btn-ghost {
+  background-color: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+}
+
+.btn-ghost:hover {
+  background-color: var(--card-bg);
+  color: var(--text);
+}
+
+.btn-danger {
+  background-color: #dc2626;
+  color: white;
+  border-color: #dc2626;
+}
+
+.btn-danger:hover {
+  background-color: #b91c1c;
+  border-color: #b91c1c;
+}
+
+/* Button Focus States */
+button:focus-visible {
+  box-shadow: 0 0 0 2px var(--button-primary-bg), 0 0 0 4px rgba(37, 99, 235, 0.2);
+}
+
+/* Button Disabled States */
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+button:disabled:hover {
+  background-color: inherit;
+  border-color: inherit;
+  box-shadow: none;
+}
+
+/* Button Loading State */
+button.loading {
+  position: relative;
+  color: transparent;
+  pointer-events: none;
+}
+
+button.loading::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1rem;
+  height: 1rem;
+  margin: -0.5rem 0 0 -0.5rem;
+  border: 2px solid transparent;
+  border-top: 2px solid currentColor;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  color: inherit;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Icon Buttons */
+.btn-icon {
+  padding: 0.5rem;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.375rem;
+}
+
+.btn-icon-sm {
+  padding: 0.25rem;
+  width: 2rem;
+  height: 2rem;
+}
+
+/* Specific Button Overrides */
+.add-card-btn {
+  font-size: 1.125rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0.5rem 1rem;
+  line-height: 1;
+  border-radius: 0.375rem;
+  transition: all 0.2s ease;
+  width: auto;
+  margin-top: 0.5rem;
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.add-card-btn:hover {
+  background: var(--card-bg);
+  color: var(--text);
+}
+
+/* Header Button Styles */
+#appControls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+#appControls button {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  height: 2.5rem;
+  min-width: 2.5rem;
+}
+
+#addColBtn {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--muted);
+}
+
+#addColBtn:hover {
+  background: var(--card-bg);
+  border-color: var(--text);
+}
+
+#themeToggle {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  font-size: 1.125rem;
+  padding: 0.5rem;
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+#themeToggle:hover {
+  background: var(--card-bg);
+  color: var(--text);
+}
+
+#viewArchivedBtn {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--muted);
+}
+
+#viewArchivedBtn:hover {
+  background: var(--card-bg);
+  border-color: var(--text);
+}
+
+#keyboardShortcutsBtn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  font-size: 1.125rem;
+  padding: 0.5rem;
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+#keyboardShortcutsBtn:hover {
+  background: var(--card-bg);
+  color: var(--text);
+}
+
+/* Filter Bar */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.75rem 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-color);
+  align-items: center;
+}
+
+.filter-bar input,
+.filter-bar select {
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--muted);
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 0.875rem;
+  height: 2.5rem;
+  box-sizing: border-box;
+}
+
+.filter-bar label {
+  font-size: 0.875rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+#clearFilterBtn {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--muted);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  height: 2.5rem;
+}
+
+#clearFilterBtn:hover {
+  background: var(--card-bg);
+  border-color: var(--text);
+}
+
+/* Responsive filter bar */
+@media (max-width: 768px) {
+  .filter-bar {
+    padding: 0.5rem 1rem;
+    gap: 0.5rem;
+  }
+  
+  .filter-bar input,
+  .filter-bar select {
+    min-width: 120px;
+  }
+  
+  .filter-bar label {
+    font-size: 0.8rem;
+  }
+}
 
 /* Dashboard Styles with Charts */
 #dashboardArea { padding: 1rem 1.5rem; background: var(--bg); border-bottom: 1px solid var(--border-color); display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
@@ -606,22 +1377,103 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
 
 /* Modal Styles */
 .modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:var(--overlay-bg);display:none;align-items:center;justify-content:center;z-index:1000;padding:1rem;}
-.modal{background:var(--modal-bg);padding:1.5rem;border-radius:.5rem;box-shadow:var(--shadow-lg);width:100%;max-width:500px; color: var(--text);max-height:90vh;overflow-y:auto;}
+.modal{background:var(--modal-bg);padding:1.5rem;border-radius:.5rem;box-shadow:var(--shadow-lg);width:100%;max-width:800px; color: var(--text);max-height:90vh;overflow-y:auto;}
 .modal h2{margin-top:0;margin-bottom:1.5rem;font-size:1.25rem; font-weight:600;}
 .modal-form label{display:block;margin-bottom:.25rem;font-size:.875rem;font-weight:500;color:var(--muted);}
 .modal-form input[type="text"],.modal-form textarea,.modal-form select,.modal-form input[type="date"]{width:100%;padding:.625rem .75rem;margin-bottom:.75rem;border-radius:.375rem;border:1px solid var(--muted);background:var(--input-bg);color:var(--text);font-family:inherit;box-sizing:border-box;font-size:0.875rem;}
 .modal-form textarea{min-height:100px;resize:vertical;}
 .modal-form input:focus, .modal-form textarea:focus, .modal-form select:focus {border-color: var(--button-primary-bg); box-shadow: 0 0 0 2px rgba(37,99,235,.2); outline:none;}
-.modal-actions{display:flex;justify-content:flex-end;gap:.75rem;margin-top:1.5rem;}
-.modal-actions button.primary{background-color:var(--button-primary-bg);color:var(--button-primary-text);border-color:transparent;}
-.modal-actions button.primary:hover{background-color:#1d4ed8;}
-.modal-actions button.secondary{background-color:var(--button-secondary-bg);color:var(--button-secondary-text);border:1px solid var(--muted);}
-.modal-actions button.secondary:hover{background-color:var(--border-color);}
+/* Modal Actions */
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.modal-actions button {
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  min-width: 5rem;
+  height: 2.5rem;
+}
+
+.modal-actions button.primary {
+  background-color: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  border-color: var(--button-primary-bg);
+}
+
+.modal-actions button.primary:hover {
+  background-color: #1d4ed8;
+  border-color: #1d4ed8;
+  box-shadow: var(--shadow-sm);
+}
+
+.modal-actions button.secondary {
+  background-color: var(--button-secondary-bg);
+  color: var(--button-secondary-text);
+  border: 1px solid var(--border-color);
+}
+
+.modal-actions button.secondary:hover {
+  background-color: var(--card-bg);
+  border-color: var(--muted);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Modal responsive adjustments */
+@media (max-width: 768px) {
+  .modal {
+    margin: 1rem;
+    padding: 1rem;
+  }
+  
+  .modal-actions {
+    flex-direction: column-reverse;
+    gap: 0.5rem;
+  }
+  
+  .modal-actions button {
+    width: 100%;
+    justify-content: center;
+  }
+}
 
 /* Board Switcher Styles */
-.board-switcher{display:flex;align-items:center;gap:0.5rem;}
-.board-select{padding:0.375rem 0.75rem;border-radius:0.375rem;border:1px solid var(--muted);background:var(--input-bg);color:var(--text);font-size:0.875rem;min-width:150px;}
-#newBoardBtn{font-size:0.875rem;padding:0.375rem 0.75rem;}
+.board-switcher {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.board-select {
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--muted);
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 0.875rem;
+  min-width: 150px;
+  height: 2.5rem;
+  box-sizing: border-box;
+}
+
+#newBoardBtn {
+  font-size: 0.875rem;
+  padding: 0.5rem 0.75rem;
+  height: 2.5rem;
+  background-color: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  border-color: var(--button-primary-bg);
+}
+
+#newBoardBtn:hover {
+  background-color: #1d4ed8;
+  border-color: #1d4ed8;
+  box-shadow: var(--shadow-sm);
+}
 
 /* Labels Styles */
 .card-labels{display:flex;gap:0.25rem;flex-wrap:wrap;margin-top:0.5rem;}
@@ -630,29 +1482,285 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
 .label-picker .label-option{display:flex;align-items:center;gap:0.25rem;padding:0.25rem;cursor:pointer;border-radius:0.25rem;}
 .label-picker .label-option:hover{background:var(--card-bg);}
 .label-picker input[type="checkbox"]{margin:0;}
-#manageLabelsBtnEl{font-size:0.75rem;padding:0.25rem 0.5rem;margin-top:0.5rem;}
+#manageLabelsBtnEl {
+  font-size: 0.75rem;
+  padding: 0.375rem 0.75rem;
+  margin-top: 0.5rem;
+  height: 2rem;
+  background-color: var(--button-secondary-bg);
+  color: var(--button-secondary-text);
+  border: 1px solid var(--border-color);
+}
+
+#manageLabelsBtnEl:hover {
+  background-color: var(--card-bg);
+  border-color: var(--muted);
+}
 
 /* Archive Styles */
-.archived-banner{background:var(--muted);color:var(--surface);padding:0.5rem 1rem;text-align:center;font-size:0.875rem;}
-#viewArchivedBtn{margin-left:1rem;font-size:0.875rem;padding:0.25rem 0.75rem;}
-.archive-btn{font-size:0.75rem;padding:0.25rem 0.5rem;margin-top:0.5rem;background:var(--card-bg);}
+.archived-banner {
+  background: var(--muted);
+  color: var(--surface);
+  padding: 0.5rem 1rem;
+  text-align: center;
+  font-size: 0.875rem;
+}
+
+.archive-btn {
+  font-size: 0.75rem;
+  padding: 0.375rem 0.75rem;
+  margin-top: 0.5rem;
+  height: 2rem;
+  background: #dc2626;
+  color: white;
+  border: 1px solid #dc2626;
+}
+
+.archive-btn:hover {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
 
 /* Keyboard Shortcuts Modal */
 .shortcuts-grid{display:grid;grid-template-columns:auto 1fr;gap:0.5rem 1rem;}
 .shortcut-key{background:var(--card-bg);padding:0.25rem 0.5rem;border-radius:0.25rem;font-family:monospace;font-size:0.875rem;font-weight:600;}
+
+/* Phase 2 UI Styles */
+/* Checklist Styles */
+.checklist {
+  background: var(--card-bg);
+  border-radius: 0.375rem;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border-color);
+}
+
+.checklist-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.checklist-title {
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--text);
+}
+
+.checklist-progress {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.checklist-items {
+  margin-bottom: 0.5rem;
+}
+
+.checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.checklist-item:last-child {
+  border-bottom: none;
+}
+
+.checklist-item input[type="checkbox"] {
+  margin: 0;
+  width: auto;
+}
+
+.checklist-item-text {
+  flex: 1;
+  font-size: 0.875rem;
+  color: var(--text);
+}
+
+.checklist-item-text.completed {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.checklist-item-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.checklist-add-item {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.checklist-add-item input {
+  flex: 1;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+  border: 1px solid var(--border-color);
+  border-radius: 0.25rem;
+  background: var(--input-bg);
+  color: var(--text);
+}
+
+/* Attachment Styles */
+.attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: var(--card-bg);
+  border-radius: 0.375rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border-color);
+}
+
+.attachment-icon {
+  width: 24px;
+  height: 24px;
+  background: var(--muted);
+  border-radius: 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  color: white;
+}
+
+.attachment-info {
+  flex: 1;
+}
+
+.attachment-name {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.attachment-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.attachment-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+/* Template Styles */
+.template-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.template-option {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 0.375rem;
+  padding: 0.5rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.template-option:hover {
+  background: var(--surface);
+  border-color: var(--button-primary-bg);
+}
+
+.template-option.selected {
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  border-color: var(--button-primary-bg);
+}
+
+/* Progress indicators */
+.progress-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--border-color);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 0.5rem;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--button-primary-bg);
+  transition: width 0.3s ease;
+}
+
+/* Card preview enhancements */
+.card-checklist-preview {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+.card-attachment-preview {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+/* Multi-column layout for card modal */
+.modal-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.modal-column {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.modal-full-width {
+  grid-column: 1 / -1;
+}
+
+/* Phase 2 sections styling */
+#checklistsSection, #attachmentsSection, #templatesSection {
+  border-top: 1px solid var(--border-color);
+  padding-top: 1rem;
+  margin-top: 1rem;
+}
+
+@media (max-width: 768px) {
+  .modal-columns {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+}
+
+/* Group headers for filtering */
+.group-header {
+  background: var(--surface);
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+  border-radius: 0.375rem;
+  border-left: 3px solid var(--button-primary-bg);
+  font-size: 0.875rem;
+  color: var(--muted);
+}
 </style></head><body>
 <header>
   <div class="board-switcher">
     <select id="boardSelect" class="board-select">
       <!-- Boards will be loaded here -->
     </select>
-    <button id="newBoardBtn" class="primary">＋ Board</button>
+    <button id="newBoardBtn" class="btn-primary">＋ Board</button>
   </div>
   <div id="appControls">
-    <button id='addColBtn'>＋ Column</button>
-    <button id='viewArchivedBtn'>📦 Archive</button>
-    <button id='keyboardShortcutsBtn'>⌨️</button>
-    <button id='themeToggle' aria-label='Toggle theme'>🌓</button>
+    <button id='addColBtn' class="btn-secondary">＋ Column</button>
+    <button id='viewArchivedBtn' class="btn-secondary">📦 Archive</button>
+    <button id='themeToggle' class="btn-ghost" aria-label='Toggle theme'>🌓</button>
   </div>
 </header>
 
@@ -664,9 +1772,27 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
   <select id='prioFilterSelect'>
     <option value=''>All Priorities</option><option value='1'>High</option><option value='2'>Medium</option><option value='3'>Low</option>
   </select>
+  <select id='labelFilterSelect'>
+    <option value=''>All Labels</option>
+    <!-- Labels will be populated here -->
+  </select>
   <label>Start: <input type='date' id='startFromInput'></label>
   <label>Due: <input type='date' id='endToInput'></label>
-  <button id='clearFilterBtn'>✕ Clear</button>
+  <select id='sortSelect'>
+    <option value=''>Default Order</option>
+    <option value='priority'>Sort by Priority</option>
+    <option value='due_date'>Sort by Due Date</option>
+    <option value='start_date'>Sort by Start Date</option>
+    <option value='title'>Sort by Title</option>
+    <option value='created'>Sort by Created Date</option>
+  </select>
+  <select id='groupBySelect'>
+    <option value=''>No Grouping</option>
+    <option value='priority'>Group by Priority</option>
+    <option value='labels'>Group by Labels</option>
+    <option value='due_date'>Group by Due Date</option>
+  </select>
+  <button id='clearFilterBtn' class="btn-secondary">✕ Clear</button>
 </div>
 <main class='board' id='boardContainer'></main>
 
@@ -676,41 +1802,75 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
     <form id="cardModalFormEl" class="modal-form">
       <input type="hidden" id="cardModalIdField">
       <input type="hidden" id="cardModalColumnIdField">
-      <div>
-        <label for="cardTitleField">Title</label>
-        <input type="text" id="cardTitleField" name="title" required>
-      </div>
-      <div>
-        <label for="cardDescriptionField">Description</label>
-        <textarea id="cardDescriptionField" name="description"></textarea>
-      </div>
-      <div>
-        <label for="cardPriorityField">Priority</label>
-        <select id="cardPriorityField" name="priority">
-          <option value="1">High</option>
-          <option value="2" selected>Medium</option>
-          <option value="3">Low</option>
-        </select>
-      </div>
-      <div>
-        <label for="cardStartDateField">Start Date</label>
-        <input type="date" id="cardStartDateField" name="start_date">
-      </div>
-      <div>
-        <label for="cardDueDateField">Due Date</label>
-        <input type="date" id="cardDueDateField" name="due_date">
-      </div>
-      <div>
-        <label>Labels</label>
-        <div id="labelPicker" class="label-picker">
-          <!-- Labels will be loaded here -->
+      
+      <div class="modal-columns">
+        <div class="modal-column">
+          <div>
+            <label for="cardTitleField">Title</label>
+            <input type="text" id="cardTitleField" name="title" required>
+          </div>
+          <div>
+            <label for="cardPriorityField">Priority</label>
+            <select id="cardPriorityField" name="priority">
+              <option value="1">High</option>
+              <option value="2" selected>Medium</option>
+              <option value="3">Low</option>
+            </select>
+          </div>
+          <div>
+            <label for="cardStartDateField">Start Date</label>
+            <input type="date" id="cardStartDateField" name="start_date">
+          </div>
+          <div>
+            <label for="cardDueDateField">Due Date</label>
+            <input type="date" id="cardDueDateField" name="due_date">
+          </div>
         </div>
-        <button type="button" id="manageLabelsBtnEl" class="secondary">Manage Labels</button>
+        
+        <div class="modal-column">
+          <div>
+            <label for="cardDescriptionField">Description</label>
+            <textarea id="cardDescriptionField" name="description"></textarea>
+          </div>
+          <div>
+            <label>Labels</label>
+            <div id="labelPicker" class="label-picker">
+              <!-- Labels will be loaded here -->
+            </div>
+            <button type="button" id="manageLabelsBtnEl" class="btn-secondary">Manage Labels</button>
+          </div>
+        </div>
       </div>
+      
+      <!-- Checklists Section -->
+      <div id="checklistsSection" style="display: none;">
+        <label>Checklists</label>
+        <div id="checklistsContainer">
+          <!-- Checklists will be loaded here -->
+        </div>
+        <button type="button" id="addChecklistBtn" class="btn-secondary btn-sm">+ Add Checklist</button>
+      </div>
+      
+      <!-- Attachments Section -->
+      <div id="attachmentsSection" style="display: none;">
+        <label>Attachments</label>
+        <div id="attachmentsContainer">
+          <!-- Attachments will be loaded here -->
+        </div>
+        <input type="file" id="attachmentInput" multiple style="display: none;">
+        <button type="button" id="addAttachmentBtn" class="btn-secondary btn-sm">+ Add Attachment</button>
+      </div>
+      
+      <!-- Templates Section -->
+      <div id="templatesSection" style="display: none;">
+        <label>Save as Template</label>
+        <button type="button" id="saveAsTemplateBtn" class="btn-secondary btn-sm">Save as Template</button>
+      </div>
+      
       <div class="modal-actions">
-        <button type="button" id="cancelCardModalBtnEl" class="secondary">Cancel</button>
-        <button type="button" id="archiveCardBtnEl" class="archive-btn" style="display:none;">Archive</button>
-        <button type="submit" id="saveCardModalBtnEl" class="primary">Save Card</button>
+        <button type="button" id="cancelCardModalBtnEl" class="btn-secondary">Cancel</button>
+        <button type="button" id="archiveCardBtnEl" class="btn-danger" style="display:none;">Archive</button>
+        <button type="submit" id="saveCardModalBtnEl" class="btn-primary">Save Card</button>
       </div>
     </form>
   </div>
@@ -731,8 +1891,25 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
         <textarea id="boardDescriptionField" name="description"></textarea>
       </div>
       <div class="modal-actions">
-        <button type="button" id="cancelBoardModalBtn" class="secondary">Cancel</button>
-        <button type="submit" id="saveBoardModalBtn" class="primary">Save Board</button>
+        <button type="button" id="cancelBoardModalBtn" class="btn-secondary">Cancel</button>
+        <button type="submit" id="saveBoardModalBtn" class="btn-primary">Save Board</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Column Modal -->
+<div id="columnModalOverlay" class="modal-overlay">
+  <div class="modal">
+    <h2>New Column</h2>
+    <form id="columnModalForm" class="modal-form">
+      <div>
+        <label for="columnTitleField">Column Title</label>
+        <input type="text" id="columnTitleField" name="title" required>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="cancelColumnModalBtn" class="btn-secondary">Cancel</button>
+        <button type="submit" id="saveColumnModalBtn" class="btn-primary">Create Column</button>
       </div>
     </form>
   </div>
@@ -751,13 +1928,13 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
         <label for="labelColorField">Color</label>
         <input type="color" id="labelColorField" value="#808080">
       </div>
-      <button type="submit" class="primary">Add Label</button>
+      <button type="submit" class="btn-primary">Add Label</button>
     </form>
     <div id="existingLabels" style="margin-top: 1.5rem;">
       <!-- Existing labels will be shown here -->
     </div>
     <div class="modal-actions">
-      <button type="button" id="closeLabelModalBtn" class="secondary">Close</button>
+      <button type="button" id="closeLabelModalBtn" class="btn-secondary">Close</button>
     </div>
   </div>
 </div>
@@ -770,29 +1947,47 @@ button{font-family:inherit; border-radius: 0.375rem; padding: 0.5rem 1rem; font-
       <!-- Archived cards will be shown here -->
     </div>
     <div class="modal-actions">
-      <button type="button" id="closeArchivedModalBtn" class="secondary">Close</button>
+      <button type="button" id="closeArchivedModalBtn" class="btn-secondary">Close</button>
     </div>
   </div>
 </div>
 
-<!-- Keyboard Shortcuts Modal -->
-<div id="shortcutsModalOverlay" class="modal-overlay">
+
+<!-- Checklist Creation Modal -->
+<div id="checklistModalOverlay" class="modal-overlay">
   <div class="modal">
-    <h2>Keyboard Shortcuts</h2>
-    <div class="shortcuts-grid">
-      <span class="shortcut-key">n</span><span>New card</span>
-      <span class="shortcut-key">b</span><span>New board</span>
-      <span class="shortcut-key">c</span><span>New column</span>
-      <span class="shortcut-key">/</span><span>Focus search</span>
-      <span class="shortcut-key">Esc</span><span>Close modals</span>
-      <span class="shortcut-key">1-3</span><span>Set priority (in card modal)</span>
-      <span class="shortcut-key">?</span><span>Show shortcuts</span>
-      <span class="shortcut-key">a</span><span>Show archived cards</span>
-      <span class="shortcut-key">l</span><span>Manage labels</span>
-    </div>
-    <div class="modal-actions">
-      <button type="button" id="closeShortcutsModalBtn" class="secondary">Close</button>
-    </div>
+    <h2>Create Checklist</h2>
+    <form id="checklistForm" class="modal-form">
+      <div>
+        <label for="checklistTitleField">Checklist Title</label>
+        <input type="text" id="checklistTitleField" name="title" required>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="cancelChecklistBtn" class="btn-secondary">Cancel</button>
+        <button type="submit" id="saveChecklistBtn" class="btn-primary">Create Checklist</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Template Creation Modal -->
+<div id="templateModalOverlay" class="modal-overlay">
+  <div class="modal">
+    <h2>Save as Template</h2>
+    <form id="templateForm" class="modal-form">
+      <div>
+        <label for="templateNameField">Template Name</label>
+        <input type="text" id="templateNameField" name="name" required>
+      </div>
+      <div>
+        <label for="templateDescriptionField">Description (optional)</label>
+        <textarea id="templateDescriptionField" name="description"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="cancelTemplateBtn" class="btn-secondary">Cancel</button>
+        <button type="submit" id="saveTemplateBtn" class="btn-primary">Save Template</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -816,7 +2011,7 @@ themeToggleBtn.onclick = () => {
 let currentBoardId = 1;
 let boards = [];
 let labels = [];
-const filterState = { q: '', prio: '', from: '', to: '', showArchived: false };
+const filterState = { q: '', prio: '', label: '', from: '', to: '', sort: '', groupBy: '', showArchived: false };
 const PRIORITY_MAP_DISPLAY = {1: "High", 2: "Medium", 3: "Low"};
 
 //── DOM Elements
@@ -857,26 +2052,46 @@ const existingLabelsEl = document.getElementById('existingLabels');
 const archivedModalOverlay = document.getElementById('archivedModalOverlay');
 const archivedCardsListEl = document.getElementById('archivedCardsList');
 
-// Shortcuts Modal
-const shortcutsModalOverlay = document.getElementById('shortcutsModalOverlay');
+// Shortcuts Modal (removed)
+// const shortcutsModalOverlay = document.getElementById('shortcutsModalOverlay');
 
 // Chart instances
 let priorityPieChart = null;
 let columnBarChart = null;
 
-//── Filter Listeners
-document.getElementById('searchInput').oninput = (e) => { filterState.q = e.target.value.toLowerCase(); applyFiltersUI(); };
-document.getElementById('prioFilterSelect').oninput = (e) => { filterState.prio = e.target.value; applyFiltersUI(); };
-document.getElementById('startFromInput').oninput = (e) => { filterState.from = e.target.value; applyFiltersUI(); };
-document.getElementById('endToInput').oninput = (e) => { filterState.to = e.target.value; applyFiltersUI(); };
-document.getElementById('clearFilterBtn').onclick = () => {
-  filterState.q = ''; filterState.prio = ''; filterState.from = ''; filterState.to = '';
-  document.getElementById('searchInput').value = '';
-  document.getElementById('prioFilterSelect').value = '';
-  document.getElementById('startFromInput').value = '';
-  document.getElementById('endToInput').value = '';
-  applyFiltersUI();
+//── Filter Listeners (with error handling)
+const setupFilterListener = (id, property) => {
+  const element = document.getElementById(id);
+  if (element) {
+    element.oninput = (e) => { 
+      filterState[property] = property === 'q' ? e.target.value.toLowerCase() : e.target.value; 
+      applyFiltersUI(); 
+    };
+  }
 };
+
+setupFilterListener('searchInput', 'q');
+setupFilterListener('prioFilterSelect', 'prio');
+setupFilterListener('labelFilterSelect', 'label');
+setupFilterListener('startFromInput', 'from');
+setupFilterListener('endToInput', 'to');
+setupFilterListener('sortSelect', 'sort');
+setupFilterListener('groupBySelect', 'groupBy');
+
+const clearBtn = document.getElementById('clearFilterBtn');
+if (clearBtn) {
+  clearBtn.onclick = () => {
+    filterState.q = ''; filterState.prio = ''; filterState.label = ''; filterState.from = ''; filterState.to = ''; filterState.sort = ''; filterState.groupBy = '';
+    
+    const inputs = ['searchInput', 'prioFilterSelect', 'labelFilterSelect', 'startFromInput', 'endToInput', 'sortSelect', 'groupBySelect'];
+    inputs.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    
+    applyFiltersUI();
+  };
+}
 
 //── API Helper
 const apiFetch = async (url, options = {}) => {
@@ -895,7 +2110,7 @@ async function refreshBoardAndMetrics() {
     try {
         const [boardData, metricsData] = await Promise.all([
             apiFetch(currentBoardId ? `/api/board/${currentBoardId}` : '/api/board'),
-            apiFetch('/api/metrics')
+            apiFetch(currentBoardId ? `/api/metrics/${currentBoardId}` : '/api/metrics')
         ]);
         if (boardData) renderBoardUI(boardData);
         if (metricsData) renderDashboardUI(metricsData);
@@ -907,6 +2122,14 @@ async function refreshBoardAndMetrics() {
 
 //── Dashboard Rendering with Charts
 function renderDashboardUI(metrics) {
+    if (!dashboardAreaEl) {
+        console.error("Dashboard area element not found");
+        return;
+    }
+    if (!metrics) {
+        console.error("No metrics data provided");
+        return;
+    }
     dashboardAreaEl.innerHTML = ''; // Clear previous dashboard
 
     // Helper to create a section
@@ -1023,6 +2246,14 @@ function formatLabel(key) {
 
 //── Board Rendering
 function renderBoardUI(boardData) {
+    if (!boardContainerEl) {
+        console.error("Board container element not found");
+        return;
+    }
+    if (!boardData || !boardData.columns) {
+        console.error("No board data or columns provided");
+        return;
+    }
     boardContainerEl.innerHTML = ''; 
     boardData.columns.forEach(column => {
         const columnEl = document.createElement('div');
@@ -1051,6 +2282,7 @@ function createCardElement(card) {
     cardEl.dataset.prio = card.priority;
     cardEl.dataset.start = card.start_date || '';
     cardEl.dataset.due = card.due_date || '';
+    cardEl.dataset.labels = card.labels ? card.labels.map(l => l.id).join(',') : '';
 
     let cardHTML = `<strong>${card.title}</strong>`;
     if (card.description) {
@@ -1114,6 +2346,25 @@ function openCardModal(card = null, columnId = null) {
         labelPickerEl.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
             checkbox.checked = labelIds.includes(parseInt(checkbox.value));
         });
+    }
+    
+    // Show Phase 2 sections when editing a card
+    const checklistsSection = document.getElementById('checklistsSection');
+    const attachmentsSection = document.getElementById('attachmentsSection');
+    const templatesSection = document.getElementById('templatesSection');
+    
+    if (isEdit) {
+        checklistsSection.style.display = 'block';
+        attachmentsSection.style.display = 'block';
+        templatesSection.style.display = 'block';
+        
+        // Load card data for Phase 2 features
+        loadCardChecklists(card.id);
+        loadCardAttachments(card.id);
+    } else {
+        checklistsSection.style.display = 'none';
+        attachmentsSection.style.display = 'none';
+        templatesSection.style.display = 'none';
     }
     
     cardModalOverlayEl.style.display = 'flex';
@@ -1191,26 +2442,127 @@ function initializeSortable(cardsContainerEl) {
     });
 }
 
-//── Filter Application (UI side)
+//── Filter Application with Sorting and Grouping
 function applyFiltersUI() {
-    document.querySelectorAll('.card').forEach(cardElement => {
-        const titleDescContent = cardElement.textContent || ""; 
-        const qOk = !filterState.q || titleDescContent.toLowerCase().includes(filterState.q);
-        const pOk = !filterState.prio || cardElement.dataset.prio === filterState.prio;
-        const sOk = !filterState.from || (cardElement.dataset.start && cardElement.dataset.start >= filterState.from);
-        const dOk = !filterState.to || (cardElement.dataset.due && cardElement.dataset.due <= filterState.to);
-        cardElement.style.display = qOk && pOk && sOk && dOk ? 'block' : 'none';
+    const columns = document.querySelectorAll('.column');
+    
+    columns.forEach(column => {
+        const cardsContainer = column.querySelector('.cards');
+        if (!cardsContainer) return;
+        
+        const cards = Array.from(cardsContainer.querySelectorAll('.card'));
+        
+        // Filter cards
+        const filteredCards = cards.filter(cardElement => {
+            const titleDescContent = cardElement.textContent || ""; 
+            const qOk = !filterState.q || titleDescContent.toLowerCase().includes(filterState.q);
+            const pOk = !filterState.prio || cardElement.dataset.prio === filterState.prio;
+            const sOk = !filterState.from || (cardElement.dataset.start && cardElement.dataset.start >= filterState.from);
+            const dOk = !filterState.to || (cardElement.dataset.due && cardElement.dataset.due <= filterState.to);
+            const lOk = !filterState.label || (cardElement.dataset.labels && cardElement.dataset.labels.includes(filterState.label));
+            
+            return qOk && pOk && sOk && dOk && lOk;
+        });
+        
+        // Sort filtered cards if sorting is enabled
+        if (filterState.sort) {
+            filteredCards.sort((a, b) => {
+                switch (filterState.sort) {
+                    case 'priority':
+                        return parseInt(a.dataset.prio) - parseInt(b.dataset.prio);
+                    case 'due_date':
+                        const aDate = a.dataset.due || '9999-12-31';
+                        const bDate = b.dataset.due || '9999-12-31';
+                        return aDate.localeCompare(bDate);
+                    case 'start_date':
+                        const aStart = a.dataset.start || '9999-12-31';
+                        const bStart = b.dataset.start || '9999-12-31';
+                        return aStart.localeCompare(bStart);
+                    case 'title':
+                        const aTitle = a.querySelector('strong')?.textContent || '';
+                        const bTitle = b.querySelector('strong')?.textContent || '';
+                        return aTitle.localeCompare(bTitle);
+                    case 'created':
+                        return parseInt(a.dataset.id) - parseInt(b.dataset.id);
+                    default:
+                        return 0;
+                }
+            });
+        }
+        
+        // Clear the container
+        cardsContainer.innerHTML = '';
+        
+        // Group cards if grouping is enabled
+        if (filterState.groupBy) {
+            displayGroupedCards(cardsContainer, filteredCards);
+        } else {
+            // Display cards normally
+            filteredCards.forEach(card => {
+                cardsContainer.appendChild(card);
+            });
+        }
+    });
+}
+
+function displayGroupedCards(container, cards) {
+    const groups = {};
+    
+    // Group cards
+    cards.forEach(card => {
+        let groupKey = 'Other';
+        
+        switch (filterState.groupBy) {
+            case 'priority':
+                groupKey = PRIORITY_MAP_DISPLAY[parseInt(card.dataset.prio)] || 'Other';
+                break;
+            case 'labels':
+                const cardLabels = card.dataset.labels ? card.dataset.labels.split(',') : [];
+                const labelNames = cardLabels.map(id => {
+                    const label = labels.find(l => l.id == id);
+                    return label ? label.name : 'Unknown';
+                });
+                groupKey = labelNames.length > 0 ? labelNames[0] : 'No Labels';
+                break;
+            case 'due_date':
+                const dueDate = card.dataset.due;
+                if (!dueDate) {
+                    groupKey = 'No Due Date';
+                } else {
+                    const today = new Date().toISOString().split('T')[0];
+                    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                    const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                    
+                    if (dueDate < today) groupKey = 'Overdue';
+                    else if (dueDate === today) groupKey = 'Due Today';
+                    else if (dueDate === tomorrow) groupKey = 'Due Tomorrow';
+                    else if (dueDate <= nextWeek) groupKey = 'Due This Week';
+                    else groupKey = 'Due Later';
+                }
+                break;
+        }
+        
+        if (!groups[groupKey]) groups[groupKey] = [];
+        groups[groupKey].push(card);
+    });
+    
+    // Display grouped cards
+    Object.entries(groups).forEach(([groupName, groupCards]) => {
+        const groupHeader = document.createElement('div');
+        groupHeader.className = 'group-header';
+        groupHeader.innerHTML = `<strong>${groupName} (${groupCards.length})</strong>`;
+        container.appendChild(groupHeader);
+        
+        groupCards.forEach(card => {
+            container.appendChild(card);
+        });
     });
 }
 
 //── Add Column
 document.getElementById('addColBtn').onclick = async () => {
-    const name = prompt('New column title:');
-    if (!name || !name.trim()) return;
-    try {
-        await apiFetch('/api/column', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name.trim(), board_id: currentBoardId }) });
-        refreshBoardAndMetrics();
-    } catch (err) { console.error("Failed to add column:", err); }
+    document.getElementById('columnModalOverlay').style.display = 'flex';
+    document.getElementById('columnTitleField').focus();
 };
 
 //── Board Management
@@ -1248,7 +2600,7 @@ async function switchBoard(boardId) {
     try {
         const [boardData, metricsData] = await Promise.all([
             apiFetch(`/api/board/${currentBoardId}`),
-            apiFetch('/api/metrics')
+            apiFetch(`/api/metrics/${currentBoardId}`)
         ]);
         
         await loadLabels();
@@ -1265,20 +2617,8 @@ boardSelectEl.addEventListener('change', (e) => {
 });
 
 newBoardBtn.addEventListener('click', async () => {
-    const name = prompt('New board name:');
-    if (!name) return;
-    try {
-        const newBoard = await apiFetch('/api/boards', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: name.trim() })
-        });
-        currentBoardId = newBoard.id;
-        await loadBoards();
-        await switchBoard(currentBoardId);
-    } catch (err) {
-        console.error("Failed to create board:", err);
-    }
+    document.getElementById('boardModalOverlay').style.display = 'flex';
+    document.getElementById('boardNameField').focus();
 });
 
 //── Archive Management
@@ -1299,7 +2639,7 @@ async function showArchivedCards() {
                     </div>
                     <div class="meta">
                         <span>${card.priority_name} Priority</span>
-                        <button onclick="unarchiveCard(${card.id})" class="primary" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">Restore</button>
+                        <button onclick="unarchiveCard(${card.id})" class="btn-primary btn-sm">Restore</button>
                     </div>
                 </div>
             `).join('');
@@ -1333,9 +2673,24 @@ async function loadLabels() {
     try {
         labels = await apiFetch(`/api/boards/${currentBoardId}/labels`);
         renderLabelPicker();
+        populateLabelFilter();
     } catch (err) {
         console.error("Failed to load labels:", err);
     }
+}
+
+function populateLabelFilter() {
+    const labelFilterSelect = document.getElementById('labelFilterSelect');
+    if (!labelFilterSelect) return;
+    
+    labelFilterSelect.innerHTML = '<option value="">All Labels</option>';
+    
+    labels.forEach(label => {
+        const option = document.createElement('option');
+        option.value = label.id;
+        option.textContent = label.name;
+        labelFilterSelect.appendChild(option);
+    });
 }
 
 function renderLabelPicker() {
@@ -1357,21 +2712,35 @@ async function loadExistingLabels() {
     existingLabelsEl.innerHTML = '<h3>Existing Labels</h3>' + labels.map(label => `
         <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
             <span class="label" style="background-color: ${label.color}">${label.name}</span>
-            <button onclick="deleteLabel(${label.id})" class="secondary" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">Delete</button>
+            <button onclick="deleteLabel(${label.id})" class="btn-danger btn-sm">Delete</button>
         </div>
     `).join('');
 }
 
 async function createLabel(event) {
     event.preventDefault();
+    console.log("Creating label...");
+    
+    if (!labelNameField || !labelColorField) {
+        console.error("Label form fields not found");
+        return;
+    }
+    
+    const name = labelNameField.value.trim();
+    if (!name) {
+        alert("Label name is required");
+        return;
+    }
+    
     const data = {
-        name: labelNameField.value.trim(),
+        name: name,
         color: labelColorField.value
     };
     
     try {
         await apiFetch(`/api/boards/${currentBoardId}/labels`, {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
         });
         
@@ -1380,6 +2749,7 @@ async function createLabel(event) {
         
         await loadLabels();
         await loadExistingLabels();
+        console.log("Label created successfully");
     } catch (err) {
         console.error("Failed to create label:", err);
     }
@@ -1402,7 +2772,7 @@ document.getElementById('viewArchivedBtn').onclick = showArchivedCards;
 document.getElementById('manageLabelsBtnEl').onclick = showLabelsModal;
 document.getElementById('closeArchivedModalBtn').onclick = () => archivedModalOverlay.style.display = 'none';
 document.getElementById('closeLabelModalBtn').onclick = () => labelsModalOverlay.style.display = 'none';
-document.getElementById('closeShortcutsModalBtn').onclick = () => shortcutsModalOverlay.style.display = 'none';
+// document.getElementById('closeShortcutsModalBtn').onclick = () => shortcutsModalOverlay.style.display = 'none';
 
 // Archive button functionality
 archiveCardBtn.onclick = () => {
@@ -1411,42 +2781,38 @@ archiveCardBtn.onclick = () => {
 };
 
 // Label form submission
-labelForm.onsubmit = createLabel;
+if (labelForm) {
+    labelForm.onsubmit = createLabel;
+    console.log("Label form connected");
+} else {
+    console.error("Label form not found");
+}
 
-// Close modals on outside click
-[archivedModalOverlay, labelsModalOverlay, shortcutsModalOverlay].forEach(overlay => {
-    overlay.onclick = (e) => {
-        if (e.target === overlay) overlay.style.display = 'none';
-    };
+// Add logging to test form submission
+document.addEventListener('DOMContentLoaded', () => {
+    console.log("DOM loaded, checking form elements:");
+    console.log("labelForm:", labelForm);
+    console.log("labelNameField:", labelNameField);
+    console.log("labelColorField:", labelColorField);
 });
 
-//── Keyboard Shortcuts
+// Close modals on outside click
+[archivedModalOverlay, labelsModalOverlay].forEach(overlay => {
+    if (overlay) {
+        overlay.onclick = (e) => {
+            if (e.target === overlay) overlay.style.display = 'none';
+        };
+    }
+});
+
+//── Keyboard Shortcuts (Limited to essential ones)
 document.addEventListener('keydown', (e) => {
+    // Only handle keyboard shortcuts when not in input fields
     if (e.target.matches('input, textarea, select')) {
-        if (cardModalOverlayEl.style.display === 'flex' && e.key >= '1' && e.key <= '3') {
-            cardPriorityField.value = e.key;
-            e.preventDefault();
-        }
         return;
     }
     
     switch(e.key) {
-        case 'n':
-            e.preventDefault();
-            openCardModal();
-            break;
-        case 'a':
-            e.preventDefault();
-            showArchivedCards();
-            break;
-        case 'l':
-            e.preventDefault();
-            showLabelsModal();
-            break;
-        case '?':
-            e.preventDefault();
-            shortcutsModalOverlay.style.display = 'flex';
-            break;
         case 'Escape':
             document.querySelectorAll('.modal-overlay').forEach(modal => {
                 modal.style.display = 'none';
@@ -1459,10 +2825,438 @@ document.addEventListener('keydown', (e) => {
 window.deleteLabel = deleteLabel;
 window.unarchiveCard = unarchiveCard;
 
+//── Phase 2 Features
+// Checklist Management
+let currentCardChecklists = [];
+
+async function loadCardChecklists(cardId) {
+    try {
+        currentCardChecklists = await apiFetch(`/api/cards/${cardId}/checklists`);
+        renderChecklists();
+    } catch (err) {
+        console.error("Failed to load checklists:", err);
+    }
+}
+
+function renderChecklists() {
+    const container = document.getElementById('checklistsContainer');
+    if (!container) return;
+    
+    container.innerHTML = currentCardChecklists.map(checklist => `
+        <div class="checklist" data-checklist-id="${checklist.id}">
+            <div class="checklist-header">
+                <span class="checklist-title">${checklist.title}</span>
+                <span class="checklist-progress">${getChecklistProgress(checklist)}</span>
+                <button onclick="deleteChecklist(${checklist.id})" class="btn-danger btn-xs">×</button>
+            </div>
+            <div class="checklist-items">
+                ${checklist.items.map(item => `
+                    <div class="checklist-item">
+                        <input type="checkbox" ${item.is_checked ? 'checked' : ''} 
+                               onchange="toggleChecklistItem(${item.id}, this.checked)">
+                        <span class="checklist-item-text ${item.is_checked ? 'completed' : ''}">${item.text}</span>
+                        <div class="checklist-item-actions">
+                            <button onclick="deleteChecklistItem(${item.id})" class="btn-danger btn-xs">×</button>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+            <div class="checklist-add-item">
+                <input type="text" placeholder="Add item..." onkeypress="if(event.key==='Enter') addChecklistItem(${checklist.id}, this.value, this)">
+                <button onclick="addChecklistItem(${checklist.id}, this.previousElementSibling.value, this.previousElementSibling)" class="btn-secondary btn-xs">Add</button>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: ${getChecklistProgressPercent(checklist)}%"></div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function getChecklistProgress(checklist) {
+    const completed = checklist.items.filter(item => item.is_checked).length;
+    const total = checklist.items.length;
+    return `${completed}/${total}`;
+}
+
+function getChecklistProgressPercent(checklist) {
+    const completed = checklist.items.filter(item => item.is_checked).length;
+    const total = checklist.items.length;
+    return total > 0 ? (completed / total) * 100 : 0;
+}
+
+async function addChecklist() {
+    const cardId = cardModalIdField.value;
+    if (!cardId) return;
+    
+    // Show checklist creation modal
+    document.getElementById('checklistModalOverlay').style.display = 'flex';
+    document.getElementById('checklistTitleField').focus();
+}
+
+async function deleteChecklist(checklistId) {
+    if (!confirm("Delete this checklist?")) return;
+    
+    try {
+        await apiFetch(`/api/checklists/${checklistId}`, { method: 'DELETE' });
+        const cardId = cardModalIdField.value;
+        await loadCardChecklists(cardId);
+    } catch (err) {
+        console.error("Failed to delete checklist:", err);
+    }
+}
+
+async function addChecklistItem(checklistId, text, inputEl) {
+    if (!text.trim()) return;
+    
+    try {
+        await apiFetch(`/api/checklists/${checklistId}/items`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text.trim() })
+        });
+        inputEl.value = '';
+        const cardId = cardModalIdField.value;
+        await loadCardChecklists(cardId);
+    } catch (err) {
+        console.error("Failed to add checklist item:", err);
+    }
+}
+
+async function toggleChecklistItem(itemId, isChecked) {
+    try {
+        await apiFetch(`/api/checklist-items/${itemId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_checked: isChecked })
+        });
+        const cardId = cardModalIdField.value;
+        await loadCardChecklists(cardId);
+    } catch (err) {
+        console.error("Failed to toggle checklist item:", err);
+    }
+}
+
+async function deleteChecklistItem(itemId) {
+    try {
+        await apiFetch(`/api/checklist-items/${itemId}`, { method: 'DELETE' });
+        const cardId = cardModalIdField.value;
+        await loadCardChecklists(cardId);
+    } catch (err) {
+        console.error("Failed to delete checklist item:", err);
+    }
+}
+
+// Attachment Management
+let currentCardAttachments = [];
+
+async function loadCardAttachments(cardId) {
+    try {
+        const card = await apiFetch(`/api/board/${currentBoardId}`);
+        const cardData = card.columns.flatMap(col => col.cards).find(c => c.id == cardId);
+        currentCardAttachments = cardData ? cardData.attachments || [] : [];
+        renderAttachments();
+    } catch (err) {
+        console.error("Failed to load attachments:", err);
+    }
+}
+
+function renderAttachments() {
+    const container = document.getElementById('attachmentsContainer');
+    if (!container) return;
+    
+    container.innerHTML = currentCardAttachments.map(attachment => `
+        <div class="attachment" data-attachment-id="${attachment.id}">
+            <div class="attachment-icon">${getFileIcon(attachment.mime_type)}</div>
+            <div class="attachment-info">
+                <div class="attachment-name">${attachment.original_filename}</div>
+                <div class="attachment-meta">${formatFileSize(attachment.file_size)}</div>
+            </div>
+            <div class="attachment-actions">
+                <button onclick="downloadAttachment(${attachment.id})" class="btn-secondary btn-xs">Download</button>
+                <button onclick="deleteAttachment(${attachment.id})" class="btn-danger btn-xs">×</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function getFileIcon(mimeType) {
+    if (mimeType.startsWith('image/')) return '🖼️';
+    if (mimeType.startsWith('text/')) return '📄';
+    if (mimeType.includes('pdf')) return '📕';
+    if (mimeType.includes('zip') || mimeType.includes('archive')) return '📦';
+    return '📎';
+}
+
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+async function addAttachment() {
+    const input = document.getElementById('attachmentInput');
+    input.click();
+}
+
+async function uploadAttachment(files) {
+    const cardId = cardModalIdField.value;
+    if (!cardId || !files.length) return;
+    
+    for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        try {
+            await fetch(`/api/cards/${cardId}/attachments`, {
+                method: 'POST',
+                body: formData
+            });
+        } catch (err) {
+            console.error("Failed to upload attachment:", err);
+        }
+    }
+    
+    await loadCardAttachments(cardId);
+}
+
+function downloadAttachment(attachmentId) {
+    window.open(`/api/attachments/${attachmentId}/download`, '_blank');
+}
+
+async function deleteAttachment(attachmentId) {
+    if (!confirm("Delete this attachment?")) return;
+    
+    try {
+        await apiFetch(`/api/attachments/${attachmentId}`, { method: 'DELETE' });
+        const cardId = cardModalIdField.value;
+        await loadCardAttachments(cardId);
+    } catch (err) {
+        console.error("Failed to delete attachment:", err);
+    }
+}
+
+// Template Management
+let currentBoardTemplates = [];
+
+async function loadBoardTemplates() {
+    try {
+        currentBoardTemplates = await apiFetch(`/api/boards/${currentBoardId}/templates`);
+    } catch (err) {
+        console.error("Failed to load templates:", err);
+    }
+}
+
+async function saveAsTemplate() {
+    const cardId = cardModalIdField.value;
+    if (!cardId) return;
+    
+    // Show template creation modal
+    document.getElementById('templateModalOverlay').style.display = 'flex';
+    document.getElementById('templateNameField').focus();
+}
+
+// Markdown Support
+function toggleMarkdownPreview(textareaId) {
+    const textarea = document.getElementById(textareaId);
+    const previewId = textareaId + 'Preview';
+    let preview = document.getElementById(previewId);
+    
+    if (!preview) {
+        preview = document.createElement('div');
+        preview.id = previewId;
+        preview.className = 'markdown-preview';
+        preview.style.cssText = `
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.375rem;
+            padding: 0.625rem 0.75rem;
+            margin-bottom: 0.75rem;
+            min-height: 100px;
+            display: none;
+        `;
+        textarea.parentNode.insertBefore(preview, textarea);
+    }
+    
+    if (preview.style.display === 'none') {
+        preview.innerHTML = parseMarkdown(textarea.value);
+        preview.style.display = 'block';
+        textarea.style.display = 'none';
+    } else {
+        preview.style.display = 'none';
+        textarea.style.display = 'block';
+    }
+}
+
+function parseMarkdown(text) {
+    return text
+        .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/`(.+?)`/g, '<code>$1</code>')
+        .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2">$1</a>')
+        .replace(/\n/g, '<br>');
+}
+
+// Event Listeners for Phase 2
+document.getElementById('addChecklistBtn').onclick = addChecklist;
+document.getElementById('addAttachmentBtn').onclick = addAttachment;
+document.getElementById('saveAsTemplateBtn').onclick = saveAsTemplate;
+document.getElementById('attachmentInput').onchange = (e) => uploadAttachment(e.target.files);
+
+// Checklist Modal Event Handlers
+document.getElementById('cancelChecklistBtn').onclick = () => {
+    document.getElementById('checklistModalOverlay').style.display = 'none';
+};
+document.getElementById('checklistModalOverlay').onclick = (e) => {
+    if (e.target === document.getElementById('checklistModalOverlay')) {
+        document.getElementById('checklistModalOverlay').style.display = 'none';
+    }
+};
+document.getElementById('checklistForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const cardId = cardModalIdField.value;
+    const title = document.getElementById('checklistTitleField').value.trim();
+    
+    if (!title) return;
+    
+    try {
+        await apiFetch(`/api/cards/${cardId}/checklists`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title })
+        });
+        await loadCardChecklists(cardId);
+        document.getElementById('checklistModalOverlay').style.display = 'none';
+        document.getElementById('checklistTitleField').value = '';
+    } catch (err) {
+        console.error("Failed to add checklist:", err);
+    }
+};
+
+// Template Modal Event Handlers
+document.getElementById('cancelTemplateBtn').onclick = () => {
+    document.getElementById('templateModalOverlay').style.display = 'none';
+};
+document.getElementById('templateModalOverlay').onclick = (e) => {
+    if (e.target === document.getElementById('templateModalOverlay')) {
+        document.getElementById('templateModalOverlay').style.display = 'none';
+    }
+};
+document.getElementById('templateForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const cardId = cardModalIdField.value;
+    const name = document.getElementById('templateNameField').value.trim();
+    const description = document.getElementById('templateDescriptionField').value.trim();
+    
+    if (!name) return;
+    
+    try {
+        // Get current card data
+        const card = await apiFetch(`/api/board/${currentBoardId}`);
+        const cardData = card.columns.flatMap(col => col.cards).find(c => c.id == cardId);
+        
+        const templateData = {
+            title: cardData.title,
+            description: cardData.description,
+            priority: cardData.priority,
+            checklists: cardData.checklists || []
+        };
+        
+        await apiFetch(`/api/boards/${currentBoardId}/templates`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name,
+                description,
+                template_data: JSON.stringify(templateData)
+            })
+        });
+        
+        document.getElementById('templateModalOverlay').style.display = 'none';
+        document.getElementById('templateNameField').value = '';
+        document.getElementById('templateDescriptionField').value = '';
+        await loadBoardTemplates();
+    } catch (err) {
+        console.error("Failed to save template:", err);
+    }
+};
+
+// Board Modal Event Handlers
+document.getElementById('cancelBoardModalBtn').onclick = () => {
+    document.getElementById('boardModalOverlay').style.display = 'none';
+};
+document.getElementById('boardModalOverlay').onclick = (e) => {
+    if (e.target === document.getElementById('boardModalOverlay')) {
+        document.getElementById('boardModalOverlay').style.display = 'none';
+    }
+};
+document.getElementById('boardModalForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const name = document.getElementById('boardNameField').value.trim();
+    
+    if (!name) return;
+    
+    try {
+        const newBoard = await apiFetch('/api/boards', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        currentBoardId = newBoard.id;
+        await loadBoards();
+        await switchBoard(currentBoardId);
+        document.getElementById('boardModalOverlay').style.display = 'none';
+        document.getElementById('boardNameField').value = '';
+        document.getElementById('boardDescriptionField').value = '';
+    } catch (err) {
+        console.error("Failed to create board:", err);
+    }
+};
+
+// Column Modal Event Handlers
+document.getElementById('cancelColumnModalBtn').onclick = () => {
+    document.getElementById('columnModalOverlay').style.display = 'none';
+};
+document.getElementById('columnModalOverlay').onclick = (e) => {
+    if (e.target === document.getElementById('columnModalOverlay')) {
+        document.getElementById('columnModalOverlay').style.display = 'none';
+    }
+};
+document.getElementById('columnModalForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const title = document.getElementById('columnTitleField').value.trim();
+    
+    if (!title) return;
+    
+    try {
+        await apiFetch('/api/column', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify({ title, board_id: currentBoardId }) 
+        });
+        refreshBoardAndMetrics();
+        document.getElementById('columnModalOverlay').style.display = 'none';
+        document.getElementById('columnTitleField').value = '';
+    } catch (err) {
+        console.error("Failed to add column:", err);
+    }
+};
+
+// Export functions for global access
+window.deleteChecklist = deleteChecklist;
+window.addChecklistItem = addChecklistItem;
+window.toggleChecklistItem = toggleChecklistItem;
+window.deleteChecklistItem = deleteChecklistItem;
+window.downloadAttachment = downloadAttachment;
+window.deleteAttachment = deleteAttachment;
+
 //── Enhanced Initialization
 async function initializeApp() {
     await loadBoards();
     await loadLabels();
+    await loadBoardTemplates();
     await refreshBoardAndMetrics();
 }
 
