@@ -973,9 +973,9 @@ TEMPLATE = r"""
 <link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap' rel='stylesheet'>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-:root{--bg:#f9fafb;--surface:#fff;--text:#111827;--muted:#6b7280;--card-bg:#f3f4f6;--high:#ef4444;--med:#f59e0b;--low:#10b981; --overlay-bg: rgba(0,0,0,0.5); --modal-bg: var(--surface); --input-bg: var(--card-bg); --button-primary-bg: #2563eb; --button-primary-text: #fff; --button-secondary-bg: var(--card-bg); --button-secondary-text: var(--text); --border-color: #e5e7eb; --shadow-sm: 0 1px 2px 0 rgba(0,0,0,.05); --shadow-md: 0 4px 6px -1px rgba(0,0,0,.1),0 2px 4px -2px rgba(0,0,0,.1); --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);
+:root{--bg:#f9fafb;--surface:#fff;--text:#111827;--muted:#6b7280;--card-bg:#f3f4f6;--high:#ef4444;--med:#f59e0b;--low:#10b981; --overlay-bg: rgba(0,0,0,0.5); --modal-bg: var(--surface); --input-bg: var(--card-bg); --button-primary-bg: #2563eb; --button-primary-text: #fff; --button-secondary-bg: var(--card-bg); --button-secondary-text: var(--text); --border-color: #e5e7eb; --shadow-sm: 0 1px 2px 0 rgba(0,0,0,.05); --shadow-md: 0 4px 6px -1px rgba(0,0,0,.1),0 2px 4px -2px rgba(0,0,0,.1); --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1); --hover-bg: rgba(0,0,0,0.05); --primary: #2563eb; --primary-text: #ffffff; --error-color: #ef4444;
 --chart-high-prio: var(--high); --chart-medium-prio: var(--med); --chart-low-prio: var(--low); --chart-bar-bg: #60a5fa; --chart-grid-color: rgba(0,0,0,0.05);}
-[data-theme=dark]{--bg:#111827;--surface:#1f2937;--text:#f3f4f6;--muted:#9ca3af;--card-bg:#374151; --modal-bg: #1f2937; --input-bg: #374151; --button-secondary-bg: #374151; --border-color: #374151;
+[data-theme=dark]{--bg:#111827;--surface:#1f2937;--text:#f3f4f6;--muted:#9ca3af;--card-bg:#374151; --modal-bg: #1f2937; --input-bg: #374151; --button-secondary-bg: #374151; --border-color: #374151; --hover-bg: rgba(255,255,255,0.1); --primary: #3b82f6; --primary-text: #ffffff; --error-color: #f87171;
 --chart-high-prio: #f87171; --chart-medium-prio: #fbbf24; --chart-low-prio: #34d399; --chart-bar-bg: #3b82f6; --chart-grid-color: rgba(255,255,255,0.1);}
 html,body{height:100%;margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:16px;line-height:1.5;}
 body{display:flex;flex-direction:column;}
@@ -1087,22 +1087,24 @@ header h1 {
 
 @media (max-width: 600px) {
   #dashboardArea {
-    grid-template-columns: 1fr; /* Single column */
+    gap: 1rem;
     padding: 0.5rem;
-    gap: 0.5rem;
   }
   
-  /* Show only charts, hide text metrics */
-  .dash-section:not(:has(.chart-container)):not(:has(.bar-chart-container)) {
+  .dash-stat {
+    min-width: 60px;
+  }
+  
+  .dash-stat-value {
+    font-size: 1.25rem;
+  }
+  
+  .dash-stat-label {
+    font-size: 0.625rem;
+  }
+  
+  .dash-separator {
     display: none;
-  }
-  
-  .dash-section {
-    padding: 0.25rem;
-  }
-  
-  .chart-container, .bar-chart-container {
-    height: 120px;
   }
 }
 
@@ -1507,16 +1509,164 @@ button.loading::after {
   }
 }
 
-/* Dashboard Styles with Charts */
-#dashboardArea { padding: 0.75rem 1rem; background: var(--bg); border-bottom: 1px solid var(--border-color); display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
-.dash-section { background: var(--surface); padding: 0.75rem; border-radius: .5rem; box-shadow: var(--shadow-md); display: flex; flex-direction: column;}
-.dash-section h3 { font-size: 1.125rem; font-weight: 600; margin-top: 0; margin-bottom: 1rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem; }
-.dash-metric { display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; padding: 0.4rem 0; border-bottom: 1px dashed var(--border-color); }
-.dash-metric:last-child { border-bottom: none; }
-.dash-metric .label { color: var(--muted); }
-.dash-metric .value { font-weight: 600; font-size:1rem;}
-.chart-container { position: relative; margin: auto; height: 150px; width:100%; max-width:250px; /* For pie chart */ }
-.bar-chart-container { position: relative; margin: auto; height: 150px; width:100%;}
+/* Compact Dashboard */
+#dashboardArea { 
+  padding: 0.75rem 1rem; 
+  background: var(--surface); 
+  border-bottom: 1px solid var(--border-color); 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center; 
+  gap: 2rem; 
+  flex-wrap: wrap;
+  min-height: 60px;
+}
+
+/* Responsive dashboard adjustments */
+@media (max-width: 768px) {
+  #dashboardArea {
+    gap: 1rem;
+    padding: 0.5rem;
+  }
+  
+  .dashboard-mode-selector {
+    margin-left: 0;
+    margin-top: 0.5rem;
+  }
+  
+  .dash-stat {
+    min-width: 60px;
+  }
+  
+  .dash-stat-value {
+    font-size: 1.25rem;
+  }
+  
+  .dash-stat-label {
+    font-size: 0.65rem;
+  }
+  
+  .dashboard-charts {
+    height: 150px !important;
+    flex-direction: column;
+  }
+}
+
+/* Small mode dashboard */
+.small-mode #dashboardArea {
+  padding: 0.5rem;
+  gap: 1rem;
+}
+
+.small-mode .dashboard-mode-selector {
+  display: none;
+}
+
+.small-mode .dash-stat {
+  min-width: 50px;
+}
+
+.small-mode .dash-stat-value {
+  font-size: 1.1rem;
+}
+
+.small-mode .dash-stat-label {
+  font-size: 0.6rem;
+}
+
+.small-mode .dashboard-charts {
+  display: none;
+}
+
+.dash-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  min-width: 80px;
+}
+
+.dash-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 0.25rem;
+}
+
+.dash-stat-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.dash-stat-action {
+  font-size: 0.65rem;
+  color: var(--primary);
+  margin-top: 0.25rem;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.dash-stat.clickable:hover .dash-stat-action {
+  opacity: 1;
+}
+
+.dash-stat.urgent .dash-stat-value {
+  color: var(--high);
+}
+
+.dash-stat.warning .dash-stat-value {
+  color: var(--med);
+}
+
+.dash-stat.success .dash-stat-value {
+  color: var(--low);
+}
+
+.dash-separator {
+  width: 1px;
+  height: 30px;
+  background: var(--border-color);
+  opacity: 0.5;
+}
+
+/* Clickable stats */
+.dash-stat.clickable {
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  border-radius: 4px;
+  padding: 0.5rem;
+  margin: -0.5rem;
+}
+
+.dash-stat.clickable:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  background: var(--hover-bg);
+}
+
+.dash-stat.clickable:active {
+  transform: translateY(0);
+}
+
+/* Dashboard charts styling */
+.dashboard-charts {
+  margin-top: 15px;
+  display: flex;
+  gap: 20px;
+  height: 180px;
+}
+
+.dashboard-charts > div {
+  flex: 1;
+  position: relative;
+}
+
+/* Clean up old dashboard elements */
+.dash-section { display: none; }
+.chart-container { display: none; }
+.bar-chart-container { display: none; }
 
 
 /* Modal Styles */
@@ -2421,9 +2571,9 @@ const archivedCardsListEl = document.getElementById('archivedCardsList');
 // Shortcuts Modal (removed)
 // const shortcutsModalOverlay = document.getElementById('shortcutsModalOverlay');
 
-// Chart instances
-let priorityPieChart = null;
-let columnBarChart = null;
+// Chart instances (no longer used)
+// let priorityPieChart = null;
+// let columnBarChart = null;
 
 //── Filter Listeners (with error handling)
 const setupFilterListener = (id, property) => {
@@ -2500,145 +2650,158 @@ async function refreshBoardAndMetrics() {
     }
 }
 
-//── Dashboard Rendering with Charts
+//── Dashboard Rendering 
 function renderDashboardUI(metrics) {
-    if (!dashboardAreaEl) {
-        console.error("Dashboard area element not found");
-        return;
-    }
+    if (!dashboardAreaEl) return;
     if (!metrics) {
-        console.error("No metrics data provided");
-        dashboardAreaEl.innerHTML = '<div style="color: var(--error-color); text-align: center; padding: 2rem;">No metrics data available</div>';
+        dashboardAreaEl.innerHTML = '<div>No metrics available</div>';
         return;
     }
     
-    try {
-        // Destroy existing charts before clearing dashboard
-        if (priorityPieChart) {
-            priorityPieChart.destroy();
-            priorityPieChart = null;
-        }
-        if (columnBarChart) {
-            columnBarChart.destroy();
-            columnBarChart = null;
+    // Destroy existing charts
+    if (window.priorityChart) {
+        window.priorityChart.destroy();
+        window.priorityChart = null;
+    }
+    if (window.columnChart) {
+        window.columnChart.destroy();
+        window.columnChart = null;
+    }
+    
+    // Simple stats
+    dashboardAreaEl.innerHTML = `
+        <div class="dash-stat urgent">
+            <div class="dash-stat-value">${metrics.due_date_insights?.total_overdue || 0}</div>
+            <div class="dash-stat-label">Overdue</div>
+        </div>
+        <div class="dash-stat warning">
+            <div class="dash-stat-value">${metrics.due_date_insights?.due_today || 0}</div>
+            <div class="dash-stat-label">Due Today</div>
+        </div>
+        <div class="dash-stat">
+            <div class="dash-stat-value">${metrics.due_date_insights?.due_next_7_days || 0}</div>
+            <div class="dash-stat-label">Due This Week</div>
+        </div>
+        <div class="dash-separator"></div>
+        <div class="dash-stat">
+            <div class="dash-stat-value">${metrics.overall_stats?.active_cards || 0}</div>
+            <div class="dash-stat-label">Active</div>
+        </div>
+        <div class="dash-stat success">
+            <div class="dash-stat-value">${metrics.overall_stats?.completed_cards || 0}</div>
+            <div class="dash-stat-label">Done</div>
+        </div>
+    `;
+    
+    // Add charts
+    const chartContainer = document.createElement('div');
+    chartContainer.style.cssText = `
+        display: flex;
+        gap: 20px;
+        margin-top: 15px;
+        height: 180px;
+    `;
+    
+    // Priority chart
+    const priorityDiv = document.createElement('div');
+    priorityDiv.style.cssText = 'flex: 1; position: relative;';
+    const priorityCanvas = document.createElement('canvas');
+    priorityDiv.appendChild(priorityCanvas);
+    chartContainer.appendChild(priorityDiv);
+    
+    // Column chart
+    const columnDiv = document.createElement('div');
+    columnDiv.style.cssText = 'flex: 1; position: relative;';
+    const columnCanvas = document.createElement('canvas');
+    columnDiv.appendChild(columnCanvas);
+    chartContainer.appendChild(columnDiv);
+    
+    dashboardAreaEl.appendChild(chartContainer);
+    
+    // Create charts with theme-aware colors
+    setTimeout(() => {
+        const textColor = getComputedStyle(document.documentElement).getPropertyValue('--text') || '#111827';
+        const surfaceColor = getComputedStyle(document.documentElement).getPropertyValue('--surface') || '#ffffff';
+        const gridColor = getComputedStyle(document.documentElement).getPropertyValue('--border-color') || '#e5e7eb';
+        
+        if (metrics.priority_insights?.labels && metrics.priority_insights?.counts) {
+            window.priorityChart = new Chart(priorityCanvas, {
+                type: 'pie',
+                data: {
+                    labels: metrics.priority_insights.labels,
+                    datasets: [{
+                        data: metrics.priority_insights.counts,
+                        backgroundColor: [
+                            getComputedStyle(document.documentElement).getPropertyValue('--high') || '#ef4444',
+                            getComputedStyle(document.documentElement).getPropertyValue('--med') || '#f59e0b',
+                            getComputedStyle(document.documentElement).getPropertyValue('--low') || '#10b981'
+                        ],
+                        borderColor: surfaceColor,
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { 
+                            position: 'bottom',
+                            labels: {
+                                color: textColor,
+                                font: { size: 12 }
+                            }
+                        }
+                    }
+                }
+            });
         }
         
-        dashboardAreaEl.innerHTML = ''; // Clear previous dashboard
-
-    // Helper to create a section
-    const createDashSection = (title) => {
-        const section = document.createElement('div');
-        section.className = 'dash-section';
-        section.innerHTML = `<h3>${title}</h3>`;
-        return section;
-    };
-    // Helper to create a metric item
-    const createMetricItem = (label, value) => `<div class="dash-metric"><span class="label">${formatLabel(label)}:</span><span class="value">${value}</span></div>`;
-
-    // Overall Stats Section
-    const overallSection = createDashSection('Overall Stats');
-    for (const [key, value] of Object.entries(metrics.overall_stats)) {
-        overallSection.innerHTML += createMetricItem(key, value);
-    }
-    dashboardAreaEl.appendChild(overallSection);
-
-    // Due Date Insights Section
-    const dueDateSection = createDashSection('Due Date Insights');
-    for (const [key, value] of Object.entries(metrics.due_date_insights)) {
-        dueDateSection.innerHTML += createMetricItem(key, value);
-    }
-     // Add Overdue High Priority to Due Date section for thematic grouping
-    dueDateSection.innerHTML += createMetricItem('Overdue High Priority', metrics.priority_insights.overdue_high_priority);
-    dashboardAreaEl.appendChild(dueDateSection);
-
-    // Priority Insights Section (Pie Chart)
-    const prioritySection = createDashSection('Priority Distribution');
-    const priorityCanvasContainer = document.createElement('div');
-    priorityCanvasContainer.className = 'chart-container';
-    const priorityCanvas = document.createElement('canvas');
-    priorityCanvas.id = 'priorityPieChart';
-    priorityCanvasContainer.appendChild(priorityCanvas);
-    prioritySection.appendChild(priorityCanvasContainer);
-    dashboardAreaEl.appendChild(prioritySection);
-
-    priorityPieChart = new Chart(priorityCanvas, {
-        type: 'pie',
-        data: {
-            labels: metrics.priority_insights.labels,
-            datasets: [{
-                label: 'Cards by Priority',
-                data: metrics.priority_insights.counts,
-                backgroundColor: [
-                    getComputedStyle(document.documentElement).getPropertyValue('--chart-high-prio').trim(), // High
-                    getComputedStyle(document.documentElement).getPropertyValue('--chart-medium-prio').trim(), // Medium
-                    getComputedStyle(document.documentElement).getPropertyValue('--chart-low-prio').trim()  // Low
-                ],
-                borderColor: getComputedStyle(document.documentElement).getPropertyValue('--surface').trim(),
-                borderWidth: 2
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: { legend: { position: 'bottom', labels: { color: getComputedStyle(document.documentElement).getPropertyValue('--text').trim() } } }
-        }
-    });
-    
-    // Column Breakdown Section (Bar Chart)
-    const columnSection = createDashSection('Cards per Column');
-    const columnCanvasContainer = document.createElement('div');
-    columnCanvasContainer.className = 'bar-chart-container';
-    const columnCanvas = document.createElement('canvas');
-    columnCanvas.id = 'columnBarChart';
-    columnCanvasContainer.appendChild(columnCanvas);
-    columnSection.appendChild(columnCanvasContainer);
-    dashboardAreaEl.appendChild(columnSection);
-
-    const columnLabels = metrics.column_breakdown.map(col => col.name);
-    const columnData = metrics.column_breakdown.map(col => col.card_count);
-    const textColor = getComputedStyle(document.documentElement).getPropertyValue('--text').trim();
-    const gridColor = getComputedStyle(document.documentElement).getPropertyValue('--chart-grid-color').trim();
-
-    columnBarChart = new Chart(columnCanvas, {
-        type: 'bar',
-        data: {
-            labels: columnLabels,
-            datasets: [{
-                label: 'Number of Cards',
-                data: columnData,
-                backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--chart-bar-bg').trim(),
-                borderColor: getComputedStyle(document.documentElement).getPropertyValue('--chart-bar-bg').trim(),
-                borderWidth: 1
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            indexAxis: 'y', // Horizontal bar chart
-            scales: {
-                x: { 
-                    beginAtZero: true, 
-                    ticks: { color: textColor, stepSize: 1 }, 
-                    grid: { color: gridColor } 
+        if (metrics.column_breakdown?.length) {
+            window.columnChart = new Chart(columnCanvas, {
+                type: 'bar',
+                data: {
+                    labels: metrics.column_breakdown.map(col => col.name),
+                    datasets: [{
+                        data: metrics.column_breakdown.map(col => col.card_count),
+                        backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--button-primary-bg') || '#2563eb',
+                        borderColor: getComputedStyle(document.documentElement).getPropertyValue('--button-primary-bg') || '#2563eb',
+                        borderWidth: 1
+                    }]
                 },
-                y: { 
-                    ticks: { color: textColor }, 
-                    grid: { display: false } 
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: { 
+                            beginAtZero: true,
+                            ticks: { 
+                                color: textColor,
+                                font: { size: 11 }
+                            },
+                            grid: { color: gridColor }
+                        },
+                        y: { 
+                            ticks: { 
+                                color: textColor,
+                                font: { size: 11 }
+                            },
+                            grid: { display: false }
+                        }
+                    }
                 }
-            },
-            plugins: { legend: { display: false } }
+            });
         }
-    });
-    
-    } catch (err) {
-        console.error("Failed to render dashboard:", err);
-        dashboardAreaEl.innerHTML = '<div style="color: var(--error-color); text-align: center; padding: 2rem;">Failed to render dashboard. Please refresh the page.</div>';
-    }
+    }, 50);
 }
 
 function formatLabel(key) {
     return key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 }
+
 
 //── Board Rendering
 function renderBoardUI(boardData) {
