@@ -428,14 +428,6 @@ def api_board_data_legacy():
     return jsonify({"id": b.id, "name": b.name, "columns": ordered_columns})
 
 
-@app.get("/api/board/<int:board_id>")
-def api_board_data_by_id(board_id):
-    app.logger.debug(f"GET /api/board/{board_id} called")
-    b = Board.query.get(board_id)
-    if not b: return jsonify({"error": "Board not found"}), 404
-    # Ensure columns are ordered by position for consistent display
-    ordered_columns = sorted([column_to_dict(c) for c in b.columns], key=lambda x: x["position"])
-    return jsonify({"id": b.id, "name": b.name, "columns": ordered_columns})
 
 
 @app.get("/api/metrics")
@@ -986,6 +978,7 @@ TEMPLATE = r"""
 [data-theme=dark]{--bg:#111827;--surface:#1f2937;--text:#f3f4f6;--muted:#9ca3af;--card-bg:#374151; --modal-bg: #1f2937; --input-bg: #374151; --button-secondary-bg: #374151; --border-color: #374151;
 --chart-high-prio: #f87171; --chart-medium-prio: #fbbf24; --chart-low-prio: #34d399; --chart-bar-bg: #3b82f6; --chart-grid-color: rgba(255,255,255,0.1);}
 html,body{height:100%;margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:16px;line-height:1.5;}
+body{display:flex;flex-direction:column;}
 /* Header Layout */
 header {
   display: flex;
@@ -1024,8 +1017,160 @@ header h1 {
     justify-content: center;
     flex-wrap: wrap;
   }
+  
+  .board {
+    padding: 0.5rem;
+    gap: 0.5rem;
+  }
+  
+  .column {
+    min-width: 280px;
+    max-width: 300px;
+  }
+  
+  #dashboardArea {
+    padding: 0.5rem;
+    grid-template-columns: 1fr;
+  }
+  
+  #calendarContainer {
+    padding: 0.5rem;
+  }
 }
-.board{display:flex;gap:1rem;padding:1rem;overflow-x:auto;height:calc(100vh - 240px - 49px)} /* Adjusted for larger dashboard */
+
+/* Extra small screens */
+@media (max-width: 480px) {
+  .board {
+    padding: 0.25rem;
+  }
+  
+  .column {
+    min-width: 250px;
+    max-width: 270px;
+  }
+  
+  #dashboardArea {
+    padding: 0.25rem;
+  }
+  
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .filter-bar input,
+  .filter-bar select {
+    width: 100%;
+  }
+}
+
+/* Minimal dashboard for narrow windows */
+@media (max-width: 800px) {
+  #dashboardArea {
+    grid-template-columns: 1fr 1fr; /* Only 2 columns max */
+  }
+  
+  .dash-section h3 {
+    display: none; /* Hide section titles */
+  }
+  
+  .dash-metric .label {
+    display: none; /* Hide metric labels */
+  }
+  
+  .dash-metric {
+    justify-content: center;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+}
+
+@media (max-width: 600px) {
+  #dashboardArea {
+    grid-template-columns: 1fr; /* Single column */
+    padding: 0.5rem;
+    gap: 0.5rem;
+  }
+  
+  /* Show only charts, hide text metrics */
+  .dash-section:not(:has(.chart-container)):not(:has(.bar-chart-container)) {
+    display: none;
+  }
+  
+  .dash-section {
+    padding: 0.25rem;
+  }
+  
+  .chart-container, .bar-chart-container {
+    height: 120px;
+  }
+}
+
+/* Single column mode for small windows */
+.board.small-mode {
+  flex-direction: column;
+}
+
+.board.small-mode .column {
+  display: none;
+  min-width: 100%;
+  max-width: 100%;
+  margin-bottom: 1rem;
+}
+
+.board.small-mode .column.active {
+  display: flex;
+}
+
+/* Column navigation */
+.column-nav {
+  display: none;
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  padding: 0.5rem;
+  border-radius: 0.375rem;
+  margin-bottom: 0.5rem;
+  box-shadow: var(--shadow-sm);
+  z-index: 10;
+}
+
+.board.small-mode .column-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.column-nav-title {
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.column-nav-buttons {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.column-nav-btn {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  border: 1px solid var(--border-color);
+  background: var(--surface);
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.column-nav-btn:hover {
+  background: var(--card-bg);
+}
+
+.column-nav-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* Main content wrapper */
+.main-content{display:flex;flex-direction:column;flex:1;min-height:0;}
+.board{display:flex;gap:1rem;padding:1rem;overflow-x:auto;flex:1;min-height:0;}
 .column{background:var(--surface);border-radius:.5rem;display:flex;flex-direction:column;min-width:300px;max-width:320px;max-height:100%; box-shadow: var(--shadow-md);}
 .column-header{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1rem;border-bottom:1px solid var(--border-color);font-weight:600; font-size: 1rem;}
 .cards{flex:1;overflow-y:auto;display:flex;flex-direction:column;padding:.75rem;gap:.75rem}
@@ -1218,15 +1363,14 @@ button.loading::after {
   background: none;
   cursor: pointer;
   color: var(--muted);
-  padding: 0.5rem 1rem;
+  padding: 0.25rem 0.5rem;
   line-height: 1;
   border-radius: 0.375rem;
   transition: all 0.2s ease;
   width: auto;
-  margin-top: 0.5rem;
-  display: block;
-  margin-left: auto;
-  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .add-card-btn:hover {
@@ -1364,15 +1508,15 @@ button.loading::after {
 }
 
 /* Dashboard Styles with Charts */
-#dashboardArea { padding: 1rem 1.5rem; background: var(--bg); border-bottom: 1px solid var(--border-color); display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
-.dash-section { background: var(--surface); padding: 1.25rem; border-radius: .5rem; box-shadow: var(--shadow-md); display: flex; flex-direction: column;}
+#dashboardArea { padding: 0.75rem 1rem; background: var(--bg); border-bottom: 1px solid var(--border-color); display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+.dash-section { background: var(--surface); padding: 0.75rem; border-radius: .5rem; box-shadow: var(--shadow-md); display: flex; flex-direction: column;}
 .dash-section h3 { font-size: 1.125rem; font-weight: 600; margin-top: 0; margin-bottom: 1rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem; }
 .dash-metric { display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; padding: 0.4rem 0; border-bottom: 1px dashed var(--border-color); }
 .dash-metric:last-child { border-bottom: none; }
 .dash-metric .label { color: var(--muted); }
 .dash-metric .value { font-weight: 600; font-size:1rem;}
-.chart-container { position: relative; margin: auto; height: 200px; width:100%; max-width:280px; /* For pie chart */ }
-.bar-chart-container { position: relative; margin: auto; height: 220px; width:100%;}
+.chart-container { position: relative; margin: auto; height: 150px; width:100%; max-width:250px; /* For pie chart */ }
+.bar-chart-container { position: relative; margin: auto; height: 150px; width:100%;}
 
 
 /* Modal Styles */
@@ -1749,6 +1893,194 @@ button.loading::after {
   font-size: 0.875rem;
   color: var(--muted);
 }
+
+/* Calendar View Styles */
+#calendarContainer {
+  padding: 1rem;
+  background: var(--bg);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.calendar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background: var(--surface);
+  border-radius: 0.5rem;
+}
+
+.calendar-nav {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 1px;
+  background: var(--border-color);
+  border: 1px solid var(--border-color);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.calendar-day-header {
+  background: var(--surface);
+  padding: 0.75rem;
+  text-align: center;
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.calendar-day {
+  background: var(--card-bg);
+  min-height: 100px;
+  padding: 0.5rem;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.calendar-day:hover {
+  background: var(--surface);
+}
+
+.calendar-day-number {
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-bottom: 0.25rem;
+}
+
+.calendar-day.other-month .calendar-day-number {
+  color: var(--muted);
+}
+
+.calendar-day.today {
+  background: var(--surface);
+  border: 2px solid var(--button-primary-bg);
+}
+
+.calendar-card {
+  background: var(--surface);
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  margin: 0.125rem 0;
+  font-size: 0.75rem;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  transition: all 0.2s;
+}
+
+.calendar-card[data-prio="1"] {
+  border-left-color: var(--high);
+}
+
+.calendar-card[data-prio="2"] {
+  border-left-color: var(--med);
+}
+
+.calendar-card[data-prio="3"] {
+  border-left-color: var(--low);
+}
+
+.calendar-card:hover {
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+/* Quick Add Card Styles */
+.quick-add-container {
+  margin-bottom: 0.5rem;
+  padding: 0.5rem;
+  background: var(--surface);
+  border-radius: 0.375rem;
+  display: none;
+}
+
+.quick-add-container.active {
+  display: block;
+}
+
+.quick-add-input {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 0.375rem;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.quick-add-hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+/* Bulk Operations Styles */
+.bulk-select-mode .card {
+  position: relative;
+  padding-left: 2rem;
+}
+
+.bulk-select-checkbox {
+  position: absolute;
+  left: 0.5rem;
+  top: 0.75rem;
+  display: none;
+}
+
+.bulk-select-mode .bulk-select-checkbox {
+  display: block;
+}
+
+.bulk-actions-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border-color);
+  padding: 1rem;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: var(--shadow-lg);
+  z-index: 100;
+}
+
+.bulk-actions-bar.active {
+  display: flex;
+}
+
+.bulk-actions-count {
+  font-weight: 500;
+}
+
+.bulk-actions-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Template Select Styles */
+.template-select {
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--muted);
+  background: var(--input-bg);
+  color: var(--text);
+  font-family: inherit;
+  box-sizing: border-box;
+  font-size: 0.875rem;
+}
 </style></head><body>
 <header>
   <div class="board-switcher">
@@ -1760,6 +2092,7 @@ button.loading::after {
   <div id="appControls">
     <button id='addColBtn' class="btn-secondary">＋ Column</button>
     <button id='viewArchivedBtn' class="btn-secondary">📦 Archive</button>
+    <button id='toggleViewBtn' class="btn-secondary">📅 Calendar</button>
     <button id='themeToggle' class="btn-ghost" aria-label='Toggle theme'>🌓</button>
   </div>
 </header>
@@ -1767,34 +2100,51 @@ button.loading::after {
 <div id="dashboardArea">
   </div>
 
-<div class='filter-bar'>
-  <input id='searchInput' placeholder='Search cards…'>
-  <select id='prioFilterSelect'>
-    <option value=''>All Priorities</option><option value='1'>High</option><option value='2'>Medium</option><option value='3'>Low</option>
-  </select>
-  <select id='labelFilterSelect'>
-    <option value=''>All Labels</option>
-    <!-- Labels will be populated here -->
-  </select>
-  <label>Start: <input type='date' id='startFromInput'></label>
-  <label>Due: <input type='date' id='endToInput'></label>
-  <select id='sortSelect'>
-    <option value=''>Default Order</option>
-    <option value='priority'>Sort by Priority</option>
-    <option value='due_date'>Sort by Due Date</option>
-    <option value='start_date'>Sort by Start Date</option>
-    <option value='title'>Sort by Title</option>
-    <option value='created'>Sort by Created Date</option>
-  </select>
-  <select id='groupBySelect'>
-    <option value=''>No Grouping</option>
-    <option value='priority'>Group by Priority</option>
-    <option value='labels'>Group by Labels</option>
-    <option value='due_date'>Group by Due Date</option>
-  </select>
-  <button id='clearFilterBtn' class="btn-secondary">✕ Clear</button>
+<div class="main-content">
+  <div class='filter-bar'>
+    <input id='searchInput' placeholder='Search cards…'>
+    <select id='prioFilterSelect'>
+      <option value=''>All Priorities</option><option value='1'>High</option><option value='2'>Medium</option><option value='3'>Low</option>
+    </select>
+    <select id='labelFilterSelect'>
+      <option value=''>All Labels</option>
+      <!-- Labels will be populated here -->
+    </select>
+    <label>Start: <input type='date' id='startFromInput'></label>
+    <label>Due: <input type='date' id='endToInput'></label>
+    <select id='sortSelect'>
+      <option value=''>Default Order</option>
+      <option value='priority'>Sort by Priority</option>
+      <option value='due_date'>Sort by Due Date</option>
+      <option value='start_date'>Sort by Start Date</option>
+      <option value='title'>Sort by Title</option>
+      <option value='created'>Sort by Created Date</option>
+    </select>
+    <select id='groupBySelect'>
+      <option value=''>No Grouping</option>
+      <option value='priority'>Group by Priority</option>
+      <option value='labels'>Group by Labels</option>
+      <option value='due_date'>Group by Due Date</option>
+    </select>
+    <button id='clearFilterBtn' class="btn-secondary">✕ Clear</button>
+  </div>
+  <main class='board' id='boardContainer'></main>
+  <div id='calendarContainer' style='display: none;'></div>
 </div>
-<main class='board' id='boardContainer'></main>
+
+<!-- Bulk Actions Bar -->
+<div id="bulkActionsBar" class="bulk-actions-bar">
+  <div class="bulk-actions-count">
+    <span id="bulkSelectCount">0</span> cards selected
+  </div>
+  <div class="bulk-actions-buttons">
+    <button id="bulkMoveBtn" class="btn-secondary">Move to Column</button>
+    <button id="bulkPriorityBtn" class="btn-secondary">Set Priority</button>
+    <button id="bulkLabelBtn" class="btn-secondary">Add/Remove Labels</button>
+    <button id="bulkArchiveBtn" class="btn-secondary">Archive</button>
+    <button id="bulkCancelBtn" class="btn-ghost">Cancel</button>
+  </div>
+</div>
 
 <div id="cardModalOverlay" class="modal-overlay">
   <div class="modal">
@@ -1802,6 +2152,14 @@ button.loading::after {
     <form id="cardModalFormEl" class="modal-form">
       <input type="hidden" id="cardModalIdField">
       <input type="hidden" id="cardModalColumnIdField">
+      
+      <!-- Template Picker for New Cards -->
+      <div id="templatePicker" style="display: none; margin-bottom: 1rem;">
+        <label>Use Template</label>
+        <select id="templateSelect" class="template-select">
+          <option value="">-- No Template --</option>
+        </select>
+      </div>
       
       <div class="modal-columns">
         <div class="modal-column">
@@ -2011,6 +2369,14 @@ themeToggleBtn.onclick = () => {
 let currentBoardId = 1;
 let boards = [];
 let labels = [];
+let currentBoardTemplates = [];
+let currentBoardData = null;
+let currentView = 'board'; // 'board' or 'calendar'
+let currentCalendarDate = new Date();
+let bulkSelectMode = false;
+let selectedCards = new Set();
+let isSmallMode = false;
+let currentColumnIndex = 0;
 const filterState = { q: '', prio: '', label: '', from: '', to: '', sort: '', groupBy: '', showArchived: false };
 const PRIORITY_MAP_DISPLAY = {1: "High", 2: "Medium", 3: "Low"};
 
@@ -2112,11 +2478,25 @@ async function refreshBoardAndMetrics() {
             apiFetch(currentBoardId ? `/api/board/${currentBoardId}` : '/api/board'),
             apiFetch(currentBoardId ? `/api/metrics/${currentBoardId}` : '/api/metrics')
         ]);
-        if (boardData) renderBoardUI(boardData);
+        if (boardData) {
+            currentBoardData = boardData;
+            renderBoardUI(boardData);
+            // Update calendar view if currently active
+            if (currentView === 'calendar') {
+                renderCalendarView();
+            }
+        }
         if (metricsData) renderDashboardUI(metricsData);
         applyFiltersUI();
+        
+        // Check small mode after dashboard is rendered
+        setTimeout(checkSmallMode, 100);
     } catch (err) {
         console.error("Refresh failed:", err);
+        // Show user-friendly error message
+        if (dashboardAreaEl) {
+            dashboardAreaEl.innerHTML = '<div style="color: var(--error-color); text-align: center; padding: 2rem;">Failed to load board data. Please refresh the page.</div>';
+        }
     }
 }
 
@@ -2128,9 +2508,22 @@ function renderDashboardUI(metrics) {
     }
     if (!metrics) {
         console.error("No metrics data provided");
+        dashboardAreaEl.innerHTML = '<div style="color: var(--error-color); text-align: center; padding: 2rem;">No metrics data available</div>';
         return;
     }
-    dashboardAreaEl.innerHTML = ''; // Clear previous dashboard
+    
+    try {
+        // Destroy existing charts before clearing dashboard
+        if (priorityPieChart) {
+            priorityPieChart.destroy();
+            priorityPieChart = null;
+        }
+        if (columnBarChart) {
+            columnBarChart.destroy();
+            columnBarChart = null;
+        }
+        
+        dashboardAreaEl.innerHTML = ''; // Clear previous dashboard
 
     // Helper to create a section
     const createDashSection = (title) => {
@@ -2168,7 +2561,6 @@ function renderDashboardUI(metrics) {
     prioritySection.appendChild(priorityCanvasContainer);
     dashboardAreaEl.appendChild(prioritySection);
 
-    if (priorityPieChart) priorityPieChart.destroy(); // Destroy old chart instance
     priorityPieChart = new Chart(priorityCanvas, {
         type: 'pie',
         data: {
@@ -2202,7 +2594,6 @@ function renderDashboardUI(metrics) {
     columnSection.appendChild(columnCanvasContainer);
     dashboardAreaEl.appendChild(columnSection);
 
-    if (columnBarChart) columnBarChart.destroy(); // Destroy old chart instance
     const columnLabels = metrics.column_breakdown.map(col => col.name);
     const columnData = metrics.column_breakdown.map(col => col.card_count);
     const textColor = getComputedStyle(document.documentElement).getPropertyValue('--text').trim();
@@ -2238,6 +2629,11 @@ function renderDashboardUI(metrics) {
             plugins: { legend: { display: false } }
         }
     });
+    
+    } catch (err) {
+        console.error("Failed to render dashboard:", err);
+        dashboardAreaEl.innerHTML = '<div style="color: var(--error-color); text-align: center; padding: 2rem;">Failed to render dashboard. Please refresh the page.</div>';
+    }
 }
 
 function formatLabel(key) {
@@ -2250,12 +2646,18 @@ function renderBoardUI(boardData) {
         console.error("Board container element not found");
         return;
     }
-    if (!boardData || !boardData.columns) {
+    if (!boardData || !boardData.columns || !Array.isArray(boardData.columns)) {
         console.error("No board data or columns provided");
+        boardContainerEl.innerHTML = '<div style="text-align: center; padding: 2rem; color: var(--error-color);">Invalid board data</div>';
         return;
     }
     boardContainerEl.innerHTML = ''; 
     boardData.columns.forEach(column => {
+        if (!column || !column.id) {
+            console.warn("Invalid column data:", column);
+            return;
+        }
+        
         const columnEl = document.createElement('div');
         columnEl.className = 'column';
         columnEl.dataset.id = column.id;
@@ -2268,21 +2670,57 @@ function renderBoardUI(boardData) {
         boardContainerEl.appendChild(columnEl);
         
         const cardsContainerEl = columnEl.querySelector('.cards');
-        column.cards.forEach(card => cardsContainerEl.appendChild(createCardElement(card)));
+        if (column.cards && Array.isArray(column.cards)) {
+            column.cards.forEach(card => {
+                if (card && card.id) {
+                    cardsContainerEl.appendChild(createCardElement(card));
+                } else {
+                    console.warn("Invalid card data:", card);
+                }
+            });
+        }
         
         initializeSortable(cardsContainerEl);
-        columnEl.querySelector('.add-card-btn').onclick = (e) => openCardModal(null, e.target.dataset.columnId);
+        const addCardBtn = columnEl.querySelector('.add-card-btn');
+        if (addCardBtn) {
+            addCardBtn.onclick = (e) => openCardModal(null, e.target.dataset.columnId);
+        }
     });
+    
+    // Re-add column navigation and update small mode if active
+    const existingNav = boardContainerEl.querySelector('.column-nav');
+    if (!existingNav) {
+        const navHTML = `
+            <div class="column-nav" id="columnNav">
+                <div class="column-nav-title" id="columnNavTitle">Column 1 of 4</div>
+                <div class="column-nav-buttons">
+                    <button class="column-nav-btn" id="prevColumnBtn" onclick="navigateColumn(-1)">‹</button>
+                    <button class="column-nav-btn" id="nextColumnBtn" onclick="navigateColumn(1)">›</button>
+                </div>
+            </div>
+        `;
+        boardContainerEl.insertAdjacentHTML('afterbegin', navHTML);
+    }
+    
+    // Update small mode display if active
+    if (isSmallMode) {
+        updateColumnDisplay();
+    }
 }
 
 function createCardElement(card) {
+    if (!card || !card.id || !card.title) {
+        console.error("Invalid card data:", card);
+        return document.createElement('div'); // Return empty div to prevent errors
+    }
+    
     const cardEl = document.createElement('div');
     cardEl.className = 'card';
     cardEl.dataset.id = card.id;
-    cardEl.dataset.prio = card.priority;
+    cardEl.dataset.prio = card.priority || 2;
     cardEl.dataset.start = card.start_date || '';
     cardEl.dataset.due = card.due_date || '';
-    cardEl.dataset.labels = card.labels ? card.labels.map(l => l.id).join(',') : '';
+    cardEl.dataset.labels = card.labels && Array.isArray(card.labels) ? card.labels.map(l => l.id).join(',') : '';
 
     let cardHTML = `<strong>${card.title}</strong>`;
     if (card.description) {
@@ -2313,8 +2751,15 @@ function createCardElement(card) {
 
 //── Card Modal Logic
 function openCardModal(card = null, columnId = null) {
+    if (!cardModalForm || !cardModalTitle || !cardModalIdField || !cardTitleField || !cardDescriptionField) {
+        console.error("Card modal elements not found");
+        return;
+    }
+    
     cardModalForm.reset();
     const isEdit = !!card;
+    const templatePicker = document.getElementById('templatePicker');
+    const templateSelect = document.getElementById('templateSelect');
     
     if (card) {
         cardModalTitle.textContent = 'Edit Card';
@@ -2335,6 +2780,20 @@ function openCardModal(card = null, columnId = null) {
     // Show/hide archive button
     if (archiveCardBtn) {
         archiveCardBtn.style.display = isEdit ? 'inline-block' : 'none';
+    }
+    
+    // Show template picker for new cards
+    if (!isEdit && currentBoardTemplates.length > 0) {
+        templatePicker.style.display = 'block';
+        templateSelect.innerHTML = '<option value="">-- No Template --</option>';
+        currentBoardTemplates.forEach(template => {
+            const option = document.createElement('option');
+            option.value = template.id;
+            option.textContent = template.name;
+            templateSelect.appendChild(option);
+        });
+    } else {
+        templatePicker.style.display = 'none';
     }
     
     // Render label picker
@@ -2403,7 +2862,10 @@ cardModalForm.onsubmit = async (e) => {
         await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cardData) });
         closeCardModal();
         refreshBoardAndMetrics();
-    } catch (err) { console.error("Failed to save card:", err); }
+    } catch (err) { 
+        console.error("Failed to save card:", err);
+        alert("Failed to save card. Please try again.");
+    }
 };
 
 //── Card Actions API
@@ -2529,14 +2991,21 @@ function displayGroupedCards(container, cards) {
                 if (!dueDate) {
                     groupKey = 'No Due Date';
                 } else {
-                    const today = new Date().toISOString().split('T')[0];
-                    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-                    const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                    const today = new Date();
+                    const todayStr = today.toISOString().split('T')[0];
                     
-                    if (dueDate < today) groupKey = 'Overdue';
-                    else if (dueDate === today) groupKey = 'Due Today';
-                    else if (dueDate === tomorrow) groupKey = 'Due Tomorrow';
-                    else if (dueDate <= nextWeek) groupKey = 'Due This Week';
+                    const tomorrow = new Date(today);
+                    tomorrow.setDate(tomorrow.getDate() + 1);
+                    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+                    
+                    const nextWeek = new Date(today);
+                    nextWeek.setDate(nextWeek.getDate() + 7);
+                    const nextWeekStr = nextWeek.toISOString().split('T')[0];
+                    
+                    if (dueDate < todayStr) groupKey = 'Overdue';
+                    else if (dueDate === todayStr) groupKey = 'Due Today';
+                    else if (dueDate === tomorrowStr) groupKey = 'Due Tomorrow';
+                    else if (dueDate <= nextWeekStr) groupKey = 'Due This Week';
                     else groupKey = 'Due Later';
                 }
                 break;
@@ -2609,6 +3078,11 @@ async function switchBoard(boardId) {
         applyFiltersUI();
     } catch (err) {
         console.error("Failed to switch board:", err);
+        alert("Failed to switch board. Please try again.");
+        // Reset board selection to previous value
+        if (boardSelectEl) {
+            boardSelectEl.value = currentBoardId;
+        }
     }
 }
 
@@ -3036,7 +3510,6 @@ async function deleteAttachment(attachmentId) {
 }
 
 // Template Management
-let currentBoardTemplates = [];
 
 async function loadBoardTemplates() {
     try {
@@ -3252,12 +3725,598 @@ window.deleteChecklistItem = deleteChecklistItem;
 window.downloadAttachment = downloadAttachment;
 window.deleteAttachment = deleteAttachment;
 
+//── Phase 3: Calendar View
+function toggleView() {
+    currentView = currentView === 'board' ? 'calendar' : 'board';
+    const boardContainer = document.getElementById('boardContainer');
+    const calendarContainer = document.getElementById('calendarContainer');
+    const toggleBtn = document.getElementById('toggleViewBtn');
+    
+    if (currentView === 'calendar') {
+        boardContainer.style.display = 'none';
+        calendarContainer.style.display = 'block';
+        toggleBtn.textContent = '📋 Board';
+        renderCalendarView();
+    } else {
+        boardContainer.style.display = 'flex';
+        calendarContainer.style.display = 'none';
+        toggleBtn.textContent = '📅 Calendar';
+    }
+}
+
+function renderCalendarView() {
+    const calendarContainer = document.getElementById('calendarContainer');
+    if (!calendarContainer) return;
+    
+    const year = currentCalendarDate.getFullYear();
+    const month = currentCalendarDate.getMonth();
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                       'July', 'August', 'September', 'October', 'November', 'December'];
+    
+    // Get first day of month and number of days
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const prevLastDay = new Date(year, month, 0);
+    const daysInMonth = lastDay.getDate();
+    const firstDayOfWeek = firstDay.getDay();
+    
+    // Get cards with due dates from actual data
+    const cardsWithDates = [];
+    if (currentBoardData && currentBoardData.columns) {
+        currentBoardData.columns.forEach(column => {
+            if (column.cards) {
+                column.cards.forEach(card => {
+                    if (card.due_date) {
+                        cardsWithDates.push({
+                            id: card.id,
+                            title: card.title,
+                            due: card.due_date,
+                            priority: card.priority
+                        });
+                    }
+                });
+            }
+        });
+    }
+    
+    let calendarHTML = `
+        <div class="calendar-header">
+            <h2>${monthNames[month]} ${year}</h2>
+            <div class="calendar-nav">
+                <button onclick="changeCalendarMonth(-1)" class="btn-ghost">◀</button>
+                <button onclick="currentCalendarDate = new Date(); renderCalendarView();" class="btn-secondary">Today</button>
+                <button onclick="changeCalendarMonth(1)" class="btn-ghost">▶</button>
+            </div>
+        </div>
+        <div class="calendar-grid">
+    `;
+    
+    // Day headers
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    dayNames.forEach(day => {
+        calendarHTML += `<div class="calendar-day-header">${day}</div>`;
+    });
+    
+    // Previous month's trailing days
+    for (let i = firstDayOfWeek - 1; i >= 0; i--) {
+        const day = prevLastDay.getDate() - i;
+        calendarHTML += `<div class="calendar-day other-month">
+            <div class="calendar-day-number">${day}</div>
+        </div>`;
+    }
+    
+    // Current month days
+    const today = new Date();
+    for (let day = 1; day <= daysInMonth; day++) {
+        const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        const isToday = today.getFullYear() === year && today.getMonth() === month && today.getDate() === day;
+        const dayCards = cardsWithDates.filter(card => card.due === dateStr);
+        
+        calendarHTML += `<div class="calendar-day ${isToday ? 'today' : ''}" data-date="${dateStr}">
+            <div class="calendar-day-number">${day}</div>`;
+        
+        dayCards.forEach(card => {
+            calendarHTML += `<div class="calendar-card" data-prio="${card.priority}" onclick="openCardById(${card.id})">
+                ${card.title}
+            </div>`;
+        });
+        
+        calendarHTML += `</div>`;
+    }
+    
+    // Next month's leading days
+    const remainingDays = 42 - (firstDayOfWeek + daysInMonth); // 6 weeks * 7 days
+    for (let day = 1; day <= remainingDays; day++) {
+        calendarHTML += `<div class="calendar-day other-month">
+            <div class="calendar-day-number">${day}</div>
+        </div>`;
+    }
+    
+    calendarHTML += `</div>`;
+    calendarContainer.innerHTML = calendarHTML;
+}
+
+function changeCalendarMonth(direction) {
+    const newDate = new Date(currentCalendarDate);
+    newDate.setMonth(newDate.getMonth() + direction);
+    currentCalendarDate = newDate;
+    renderCalendarView();
+}
+
+function openCardById(cardId) {
+    // Find the card data and open modal
+    if (!cardId || !currentBoardId) {
+        console.error("Invalid cardId or currentBoardId");
+        return;
+    }
+    
+    fetch(`/api/board/${currentBoardId}`)
+        .then(res => res.json())
+        .then(boardData => {
+            const card = boardData.columns.flatMap(col => col.cards).find(c => c.id == cardId);
+            if (card) openCardModal(card);
+        });
+}
+
+// Phase 3: Quick Add Cards
+function enableQuickAdd(columnId) {
+    const column = document.querySelector(`[data-id="${columnId}"]`);
+    if (!column) return;
+    
+    const cardsContainer = column.querySelector('.cards');
+    let quickAddContainer = column.querySelector('.quick-add-container');
+    
+    if (!quickAddContainer) {
+        quickAddContainer = document.createElement('div');
+        quickAddContainer.className = 'quick-add-container';
+        quickAddContainer.innerHTML = `
+            <input type="text" class="quick-add-input" placeholder="Enter card title (use #high, #medium, #low for priority)">
+            <div class="quick-add-hint">Press Enter to add, Esc to cancel</div>
+        `;
+        cardsContainer.parentNode.insertBefore(quickAddContainer, cardsContainer);
+    }
+    
+    quickAddContainer.classList.add('active');
+    const input = quickAddContainer.querySelector('.quick-add-input');
+    input.focus();
+    
+    input.onkeydown = async (e) => {
+        if (e.key === 'Enter' && input.value.trim()) {
+            await createQuickCard(columnId, input.value.trim());
+            input.value = '';
+        } else if (e.key === 'Escape') {
+            quickAddContainer.classList.remove('active');
+            input.value = '';
+        }
+    };
+}
+
+async function createQuickCard(columnId, text) {
+    // Parse quick add syntax
+    let title = text;
+    let priority = 2; // default medium
+    
+    // Extract priority
+    const priorityMatch = text.match(/#(high|medium|low)/i);
+    if (priorityMatch) {
+        const priorityMap = { 'high': 1, 'medium': 2, 'low': 3 };
+        priority = priorityMap[priorityMatch[1].toLowerCase()];
+        title = text.replace(priorityMatch[0], '').trim();
+    }
+    
+    // Extract due date (@tomorrow, @nextweek, etc.)
+    let dueDate = null;
+    const dateMatch = text.match(/@(\w+)/);
+    if (dateMatch) {
+        const dateStr = dateMatch[1].toLowerCase();
+        const today = new Date();
+        
+        if (dateStr === 'today') {
+            dueDate = today.toISOString().split('T')[0];
+        } else if (dateStr === 'tomorrow') {
+            const tomorrow = new Date(today);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            dueDate = tomorrow.toISOString().split('T')[0];
+        } else if (dateStr === 'nextweek') {
+            const nextWeek = new Date(today);
+            nextWeek.setDate(nextWeek.getDate() + 7);
+            dueDate = nextWeek.toISOString().split('T')[0];
+        }
+        
+        if (dueDate) {
+            title = title.replace(dateMatch[0], '').trim();
+        }
+    }
+    
+    // Create card
+    try {
+        await apiFetch('/api/card', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title,
+                description: '',
+                column_id: parseInt(columnId),
+                priority,
+                due_date: dueDate
+            })
+        });
+        refreshBoardAndMetrics();
+    } catch (err) {
+        console.error("Failed to create quick card:", err);
+    }
+}
+
+// Phase 3: Bulk Operations
+function toggleBulkSelectMode() {
+    bulkSelectMode = !bulkSelectMode;
+    selectedCards.clear();
+    
+    const board = document.getElementById('boardContainer');
+    const bulkBar = document.getElementById('bulkActionsBar');
+    
+    if (bulkSelectMode) {
+        board.classList.add('bulk-select-mode');
+        addBulkSelectCheckboxes();
+    } else {
+        board.classList.remove('bulk-select-mode');
+        removeBulkSelectCheckboxes();
+        bulkBar.classList.remove('active');
+    }
+}
+
+function addBulkSelectCheckboxes() {
+    document.querySelectorAll('.card').forEach(card => {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'bulk-select-checkbox';
+        checkbox.onclick = (e) => {
+            e.stopPropagation();
+            toggleCardSelection(card.dataset.id);
+        };
+        card.appendChild(checkbox);
+    });
+}
+
+function removeBulkSelectCheckboxes() {
+    document.querySelectorAll('.bulk-select-checkbox').forEach(cb => cb.remove());
+}
+
+function toggleCardSelection(cardId) {
+    if (selectedCards.has(cardId)) {
+        selectedCards.delete(cardId);
+    } else {
+        selectedCards.add(cardId);
+    }
+    
+    updateBulkActionsBar();
+}
+
+function updateBulkActionsBar() {
+    const bulkBar = document.getElementById('bulkActionsBar');
+    const countEl = document.getElementById('bulkSelectCount');
+    
+    countEl.textContent = selectedCards.size;
+    
+    if (selectedCards.size > 0) {
+        bulkBar.classList.add('active');
+    } else {
+        bulkBar.classList.remove('active');
+    }
+}
+
+async function bulkMoveCards() {
+    if (!currentBoardData || !currentBoardData.columns) {
+        alert('Board data not available. Please refresh the page.');
+        return;
+    }
+    
+    // Create column selection modal
+    const columns = currentBoardData.columns;
+    const columnOptions = columns.map(col => `<option value="${col.id}">${col.title}</option>`).join('');
+    
+    const modalHTML = `
+        <div style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;">
+            <div style="background: var(--card-bg); padding: 2rem; border-radius: 8px; max-width: 400px; width: 90%;">
+                <h3>Move ${selectedCards.size} cards to column:</h3>
+                <select id="bulkColumnSelect" style="width: 100%; padding: 0.5rem; margin: 1rem 0; border: 1px solid var(--border); border-radius: 4px;">
+                    <option value="">Select a column</option>
+                    ${columnOptions}
+                </select>
+                <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+                    <button onclick="closeBulkMoveModal()" style="padding: 0.5rem 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; cursor: pointer;">Cancel</button>
+                    <button onclick="executeBulkMove()" style="padding: 0.5rem 1rem; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer;">Move</button>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    const modalEl = document.createElement('div');
+    modalEl.innerHTML = modalHTML;
+    modalEl.id = 'bulkMoveModal';
+    document.body.appendChild(modalEl);
+}
+
+function closeBulkMoveModal() {
+    const modal = document.getElementById('bulkMoveModal');
+    if (modal) modal.remove();
+}
+
+async function executeBulkMove() {
+    const columnId = document.getElementById('bulkColumnSelect').value;
+    if (!columnId) {
+        alert('Please select a column');
+        return;
+    }
+    
+    const bulkMoveBtn = document.querySelector('#bulkMoveModal button[onclick="executeBulkMove()"]');
+    bulkMoveBtn.textContent = 'Moving...';
+    bulkMoveBtn.disabled = true;
+    
+    let successful = 0;
+    let failed = 0;
+    
+    for (const cardId of selectedCards) {
+        try {
+            await apiFetch(`/api/card/${cardId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ column_id: parseInt(columnId) })
+            });
+            successful++;
+        } catch (err) {
+            console.error(`Failed to move card ${cardId}:`, err);
+            failed++;
+        }
+    }
+    
+    closeBulkMoveModal();
+    
+    if (failed > 0) {
+        alert(`Moved ${successful} cards successfully. ${failed} cards failed to move.`);
+    }
+    
+    toggleBulkSelectMode();
+    refreshBoardAndMetrics();
+}
+
+async function bulkArchiveCards() {
+    if (!confirm(`Archive ${selectedCards.size} cards? This action can be undone from the archive.`)) return;
+    
+    // Show progress indicator
+    const bulkBar = document.getElementById('bulkActionsBar');
+    const originalContent = bulkBar.innerHTML;
+    bulkBar.innerHTML = '<div style="text-align: center; padding: 1rem;">Archiving cards...</div>';
+    
+    let successful = 0;
+    let failed = 0;
+    
+    for (const cardId of selectedCards) {
+        try {
+            await apiFetch(`/api/cards/${cardId}/archive`, { method: 'POST' });
+            successful++;
+        } catch (err) {
+            console.error(`Failed to archive card ${cardId}:`, err);
+            failed++;
+        }
+    }
+    
+    // Restore original content
+    bulkBar.innerHTML = originalContent;
+    
+    if (failed > 0) {
+        alert(`Archived ${successful} cards successfully. ${failed} cards failed to archive.`);
+    }
+    
+    toggleBulkSelectMode();
+    refreshBoardAndMetrics();
+}
+
+// Template selection handler
+document.getElementById('templateSelect').onchange = async (e) => {
+    const templateId = e.target.value;
+    if (!templateId) return;
+    
+    // Ensure templates are loaded
+    if (!currentBoardTemplates || currentBoardTemplates.length === 0) {
+        console.warn("Templates not loaded yet, loading now...");
+        await loadBoardTemplates();
+    }
+    
+    const template = currentBoardTemplates.find(t => t.id == templateId);
+    if (!template) {
+        console.error("Template not found:", templateId);
+        return;
+    }
+    
+    try {
+        const templateData = JSON.parse(template.template_data);
+        
+        // Apply template data to form fields
+        cardTitleField.value = templateData.title || '';
+        cardDescriptionField.value = templateData.description || '';
+        cardPriorityField.value = templateData.priority || 2;
+        
+        // TODO: Apply checklists from template when creating the card
+    } catch (err) {
+        console.error("Failed to apply template:", err);
+    }
+};
+
+// Event listeners for Phase 3
+document.getElementById('toggleViewBtn').onclick = toggleView;
+document.getElementById('bulkCancelBtn').onclick = toggleBulkSelectMode;
+document.getElementById('bulkMoveBtn').onclick = bulkMoveCards;
+document.getElementById('bulkArchiveBtn').onclick = bulkArchiveCards;
+
+// Add quick add to column headers
+document.addEventListener('dblclick', (e) => {
+    if (e.target.classList.contains('column-header')) {
+        const columnId = e.target.closest('.column').dataset.id;
+        enableQuickAdd(columnId);
+    }
+});
+
+// Export functions for onclick handlers
+window.changeCalendarMonth = changeCalendarMonth;
+window.openCardById = openCardById;
+
+// Enable bulk select with keyboard shortcut
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'm' && !e.target.matches('input, textarea, select')) {
+        toggleBulkSelectMode();
+    }
+});
+
+//── Small Mode Functions
+function checkSmallMode() {
+    const wasSmallMode = isSmallMode;
+    
+    // Calculate available space for columns
+    const dashboardArea = document.getElementById('dashboardArea');
+    const boardContainer = document.getElementById('boardContainer');
+    
+    if (!boardContainer || !dashboardArea) return;
+    
+    // Get dashboard height
+    const dashboardHeight = dashboardArea.offsetHeight;
+    const windowHeight = window.innerHeight;
+    const availableHeight = windowHeight - dashboardHeight - 120; // Account for header + filter bar
+    
+    // Check if window width can accommodate columns well
+    const minColumnWidth = 300; // Minimum comfortable column width
+    const maxColumnsForComfort = Math.floor(window.innerWidth / minColumnWidth);
+    const totalColumns = currentBoardData?.columns?.length || 0;
+    
+    // Enter small mode if:
+    // 1. Window width is <= dashboard height * 1.5, OR
+    // 2. Can't comfortably fit more than 1 column, OR  
+    // 3. Available height is too constrained
+    isSmallMode = (
+        window.innerWidth <= dashboardHeight * 1.5 ||
+        maxColumnsForComfort <= 1 ||
+        availableHeight < 300
+    );
+    
+    if (isSmallMode && !wasSmallMode) {
+        // Entering small mode
+        boardContainer.classList.add('small-mode');
+        currentColumnIndex = 0;
+        updateColumnDisplay();
+    } else if (!isSmallMode && wasSmallMode) {
+        // Exiting small mode
+        boardContainer.classList.remove('small-mode');
+        // Show all columns
+        const columns = boardContainer.querySelectorAll('.column');
+        columns.forEach(col => col.classList.remove('active'));
+    }
+}
+
+function navigateColumn(direction) {
+    if (!isSmallMode || !currentBoardData) return;
+    
+    const totalColumns = currentBoardData.columns ? currentBoardData.columns.length : 0;
+    if (totalColumns === 0) return;
+    
+    currentColumnIndex += direction;
+    
+    // Wrap around
+    if (currentColumnIndex < 0) {
+        currentColumnIndex = totalColumns - 1;
+    } else if (currentColumnIndex >= totalColumns) {
+        currentColumnIndex = 0;
+    }
+    
+    updateColumnDisplay();
+}
+
+function updateColumnDisplay() {
+    if (!isSmallMode || !currentBoardData) return;
+    
+    const boardContainer = document.getElementById('boardContainer');
+    const columnNavTitle = document.getElementById('columnNavTitle');
+    const prevBtn = document.getElementById('prevColumnBtn');
+    const nextBtn = document.getElementById('nextColumnBtn');
+    
+    if (!boardContainer || !columnNavTitle) return;
+    
+    const columns = boardContainer.querySelectorAll('.column');
+    const totalColumns = columns.length;
+    
+    if (totalColumns === 0) return;
+    
+    // Hide all columns
+    columns.forEach(col => col.classList.remove('active'));
+    
+    // Show current column
+    if (columns[currentColumnIndex]) {
+        columns[currentColumnIndex].classList.add('active');
+        const columnTitle = currentBoardData.columns[currentColumnIndex]?.title || 'Column';
+        columnNavTitle.textContent = `${columnTitle} (${currentColumnIndex + 1}/${totalColumns})`;
+    }
+    
+    // Update button states
+    if (prevBtn) prevBtn.disabled = false;
+    if (nextBtn) nextBtn.disabled = false;
+}
+
+// Touch support for small mode
+let touchStartX = 0;
+let touchEndX = 0;
+
+function handleTouchStart(e) {
+    if (!isSmallMode) return;
+    touchStartX = e.changedTouches[0].screenX;
+}
+
+function handleTouchEnd(e) {
+    if (!isSmallMode) return;
+    touchEndX = e.changedTouches[0].screenX;
+    handleSwipe();
+}
+
+function handleSwipe() {
+    const swipeThreshold = 50; // Minimum distance for a swipe
+    const swipeDistance = touchEndX - touchStartX;
+    
+    if (Math.abs(swipeDistance) > swipeThreshold) {
+        if (swipeDistance > 0) {
+            // Swipe right - go to previous column
+            navigateColumn(-1);
+        } else {
+            // Swipe left - go to next column
+            navigateColumn(1);
+        }
+    }
+}
+
+// Add touch listeners to board container
+function addTouchSupport() {
+    const boardContainer = document.getElementById('boardContainer');
+    if (boardContainer) {
+        boardContainer.addEventListener('touchstart', handleTouchStart, { passive: true });
+        boardContainer.addEventListener('touchend', handleTouchEnd, { passive: true });
+    }
+}
+
+// Make functions globally available
+window.navigateColumn = navigateColumn;
+
 //── Enhanced Initialization
 async function initializeApp() {
     await loadBoards();
     await loadLabels();
     await loadBoardTemplates();
     await refreshBoardAndMetrics();
+    
+    // Initialize small mode
+    checkSmallMode();
+    
+    // Add touch support for mobile
+    addTouchSupport();
+    
+    // Add resize listener
+    window.addEventListener('resize', checkSmallMode);
 }
 
 //── Initial Load
